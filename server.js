@@ -28,6 +28,8 @@ const defaultCorsOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:5174",
+  "https://poetic-fox-ac184c.netlify.app",
+  "https://rusticcharmfrontend.netlify.app",
 ];
 const configuredCorsOrigins = (process.env.CORS_ORIGINS || "")
   .split(",")
