@@ -646,13 +646,26 @@ export async function deleteAllCompletedOrders(db) {
 export async function updateOrder(db, id, updates) {
   if (!id) throw new Error("Order ID is required");
   if (isSqliteDb(db)) {
-    const entries = Object.entries({
+    const currentOrder = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
+    if (!currentOrder) throw new Error("Order not found");
+
+    const now = new Date().toISOString();
+    let table;
+    if (updates.tableId !== undefined) {
+      table = await db.get("SELECT * FROM tables WHERE id = ?", [updates.tableId]);
+      if (!table) throw new Error("Selected table was not found");
+      if (table.id !== currentOrder.table_id && table.occupied && table.current_order_id && table.current_order_id !== id) {
+        throw new Error("Selected table is occupied");
+      }
+    }
+
+    const orderUpdates = {
       session_id: updates.sessionId,
-      table_id: updates.tableId,
-      table_reference: updates.tableReference,
-      table_number: updates.tableNumber,
-      table_area: updates.tableArea,
-      table_label: updates.tableLabel,
+      table_id: table?.id ?? updates.tableId,
+      table_reference: table?.table_key ?? updates.tableReference,
+      table_number: table ? table.table_number : updates.tableNumber,
+      table_area: table ? table.area : updates.tableArea,
+      table_label: table ? table.display_name : updates.tableLabel,
       order_number: updates.orderNumber,
       status: updates.status,
       total: updates.total,
@@ -669,14 +682,48 @@ export async function updateOrder(db, id, updates) {
       accepted_at: updates.acceptedAt,
       served_at: updates.servedAt,
       completed_at: updates.completedAt,
-      updated_at: new Date().toISOString(),
-    }).filter(([, value]) => value !== undefined);
+      updated_at: now,
+    };
+    const entries = Object.entries(orderUpdates).filter(([, value]) => value !== undefined);
     if (!entries.length) return { id, ...updates };
-    const clauses = entries.map(([key]) => `${key} = ?`).join(", ");
-    const params = entries.map(([, value]) => value);
-    params.push(id);
-    await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
-    return { id, ...updates };
+
+    await db.run("BEGIN TRANSACTION");
+    try {
+      const clauses = entries.map(([key]) => `${key} = ?`).join(", ");
+      const params = entries.map(([, value]) => value);
+      params.push(id);
+      await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+
+      if (table && table.id !== currentOrder.table_id) {
+        const oldTableParams = [now, currentOrder.table_id, id];
+        if (currentOrder.session_id) oldTableParams.push(currentOrder.session_id);
+        await db.run(
+          `UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ? AND (current_order_id = ?${currentOrder.session_id ? " OR current_session_id = ?" : ""})`,
+          oldTableParams
+        );
+        await db.run(
+          "UPDATE tables SET occupied = 1, status = 'occupied', current_order_id = ?, current_session_id = ?, updated_at = ? WHERE id = ?",
+          [id, currentOrder.session_id || "", now, table.id]
+        );
+
+        if (currentOrder.session_id) {
+          await db.run(
+            "UPDATE sessions SET table_id = ?, table_reference = ?, updated_at = ? WHERE id = ?",
+            [table.id, table.table_key, now, currentOrder.session_id]
+          );
+          await db.run(
+            "UPDATE orders SET table_id = ?, table_reference = ?, table_number = ?, table_area = ?, table_label = ?, updated_at = ? WHERE session_id = ?",
+            [table.id, table.table_key, table.table_number, table.area, table.display_name, now, currentOrder.session_id]
+          );
+        }
+      }
+
+      await db.run("COMMIT");
+    } catch (error) {
+      await db.run("ROLLBACK");
+      throw error;
+    }
+    return { id, ...updates, ...(table ? { tableId: table.id, tableReference: table.table_key, tableNumber: table.table_number, tableArea: table.area, tableLabel: table.display_name } : {}) };
   }
   await ordersCollection(db).doc(id).update(updates);
   return { id, ...updates };
