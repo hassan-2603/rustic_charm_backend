@@ -622,6 +622,7 @@ export async function createAdminOrder(db, order) {
 export async function deleteAllOrders(db) {
   if (isSqliteDb(db)) {
     const result = await db.run("DELETE FROM orders");
+    await db.run("VACUUM");
     return { count: result.changes };
   }
   const snapshot = await ordersCollection(db).get();
@@ -633,6 +634,7 @@ export async function deleteAllOrders(db) {
 export async function deleteAllCompletedOrders(db) {
   if (isSqliteDb(db)) {
     const result = await db.run("DELETE FROM orders WHERE status = 'Completed'");
+    await db.run("VACUUM");
     return { count: result.changes };
   }
   const snapshot = await ordersCollection(db).get();

@@ -109,6 +109,41 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// ==========================================
+// BASIC RATE LIMITING (in-memory, per IP)
+// ==========================================
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute window
+const RATE_LIMIT_MAX_REQUESTS = 120; // max requests per IP per window
+const rateLimitBuckets = new Map();
+
+app.use((req, res, next) => {
+  const key = req.ip || req.connection?.remoteAddress || "unknown";
+  const now = Date.now();
+  const bucket = rateLimitBuckets.get(key);
+
+  if (!bucket || now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+    rateLimitBuckets.set(key, { windowStart: now, count: 1 });
+    return next();
+  }
+
+  bucket.count += 1;
+  if (bucket.count > RATE_LIMIT_MAX_REQUESTS) {
+    return res.status(429).json({ ok: false, error: "Too many requests. Please slow down and try again shortly." });
+  }
+
+  next();
+});
+
+// Periodically clear stale buckets so memory usage doesn't grow unbounded
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateLimitBuckets.entries()) {
+    if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+      rateLimitBuckets.delete(key);
+    }
+  }
+}, RATE_LIMIT_WINDOW_MS).unref?.();
+
 app.locals.db = sqliteDb;
 console.log("🗄️ SQLite database initialized for the backend data layer");
 
@@ -121,8 +156,16 @@ if (process.env.GEMINI_API_KEY) {
 // ==========================================
 // ADMIN AUTHENTICATION (SECURE TOKEN-BASED)
 // ==========================================
-const ADMIN_USER = process.env.ADMIN_USERNAME || "admin";
-const ADMIN_PASS = process.env.ADMIN_PASSWORD || "admin111";
+const isProductionEnv = process.env.NODE_ENV === "production";
+if (!isProductionEnv) {
+  console.warn("\u26a0\ufe0f  NODE_ENV is not set to 'production'. Development-only fallbacks (default admin credentials, unsigned JWT decode in auth.js) are ACTIVE. Set NODE_ENV=production before deploying.");
+}
+// In production, there is NO hardcoded fallback — these must be set in the environment.
+const ADMIN_USER = process.env.ADMIN_USERNAME || (isProductionEnv ? undefined : "admin");
+const ADMIN_PASS = process.env.ADMIN_PASSWORD || (isProductionEnv ? undefined : "admin111");
+if (isProductionEnv && (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD)) {
+  console.error("[server] FATAL: ADMIN_USERNAME/ADMIN_PASSWORD are not set in the production environment.");
+}
 
 
 // Serve food images as static assets

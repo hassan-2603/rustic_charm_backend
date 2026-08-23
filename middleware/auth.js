@@ -2,7 +2,13 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-const ADMIN_TOKEN = process.env.ADMIN_API_TOKEN || "rustic-charm-admin-token";
+const isProductionEnv = process.env.NODE_ENV === "production";
+// In production, there is NO hardcoded fallback token — ADMIN_API_TOKEN must be set
+// in the environment, or local token-based admin auth is disabled entirely.
+const ADMIN_TOKEN = process.env.ADMIN_API_TOKEN || (isProductionEnv ? null : "rustic-charm-admin-token");
+if (isProductionEnv && !process.env.ADMIN_API_TOKEN) {
+  console.error("[auth] FATAL: ADMIN_API_TOKEN is not set. The local admin-token auth path is disabled until this environment variable is configured.");
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
