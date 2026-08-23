@@ -7,6 +7,7 @@ import {
   updateTable,
   getOrders,
   updateOrder,
+  createAdminOrder,
   getKitchenCredentials,
 } from "../services/adminService.js";
 
@@ -92,6 +93,17 @@ router.put("/orders/:id", async (req, res, next) => {
     res.json(buildApiResponse(updatedOrder));
   } catch (err) {
     next(buildApiError(err.message, 500));
+  }
+});
+
+// Waiter's "Order by Captain" flow places an order directly on behalf of a
+// table/waiter, same shape as the admin order-creation endpoint.
+router.post("/orders", async (req, res, next) => {
+  try {
+    const order = await createAdminOrder(req.app.locals.db, req.body || {});
+    res.status(201).json(buildApiResponse(order));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
   }
 });
 
