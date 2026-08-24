@@ -7,6 +7,7 @@ import {
   updateTable,
   getOrders,
   updateOrder,
+  addOrderItems,
   createAdminOrder,
   getKitchenCredentials,
 } from "../services/adminService.js";
@@ -90,6 +91,24 @@ router.put("/orders/:id", async (req, res, next) => {
       return res.status(400).json({ ok: false, error: "Order ID is required" });
     }
     const updatedOrder = await updateOrder(req.app.locals.db, id, updates);
+    res.json(buildApiResponse(updatedOrder));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
+// Add item(s) to an existing order ("Add Item" button on the waiter's My Orders card)
+router.post("/orders/:id/items", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { items } = req.body || {};
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Order ID is required" });
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ ok: false, error: "At least one item is required" });
+    }
+    const updatedOrder = await addOrderItems(req.app.locals.db, id, items);
     res.json(buildApiResponse(updatedOrder));
   } catch (err) {
     next(buildApiError(err.message, 500));

@@ -569,6 +569,11 @@ export async function getOrders(db) {
         discountValue: row.discount_value,
         discountAmount: row.discount_amount,
         finalTotal: row.final_total,
+        discountMode: row.discount_mode,
+        foodDiscountPercent: row.food_discount_percent,
+        alcoholDiscountPercent: row.alcohol_discount_percent,
+        foodDiscountAmount: row.food_discount_amount,
+        alcoholDiscountAmount: row.alcohol_discount_amount,
         waiterId: row.waiter_id,
         waiterName: row.waiter_name,
         acceptedAt: row.accepted_at,
@@ -679,6 +684,11 @@ export async function updateOrder(db, id, updates) {
       discount_value: updates.discountValue,
       discount_amount: updates.discountAmount,
       final_total: updates.finalTotal,
+      discount_mode: updates.discountMode,
+      food_discount_percent: updates.foodDiscountPercent,
+      alcohol_discount_percent: updates.alcoholDiscountPercent,
+      food_discount_amount: updates.foodDiscountAmount,
+      alcohol_discount_amount: updates.alcoholDiscountAmount,
       waiter_id: updates.waiterId,
       waiter_name: updates.waiterName,
       accepted_at: updates.acceptedAt,
@@ -728,6 +738,115 @@ export async function updateOrder(db, id, updates) {
     return { id, ...updates, ...(table ? { tableId: table.id, tableReference: table.table_key, tableNumber: table.table_number, tableArea: table.area, tableLabel: table.display_name } : {}) };
   }
   await ordersCollection(db).doc(id).update(updates);
+  return { id, ...updates };
+}
+
+/**
+ * Adds one or more items to an existing order (used by the "Add Item" flow
+ * on both the Admin "View Details" drawer and the Waiter "My Orders" card).
+ * This only inserts additional order_items / appends to the items array and
+ * recalculates the order total — it never touches any other order field.
+ * If the order already has a discount amount applied, finalTotal is kept in
+ * sync (same discountAmount, recomputed against the new total).
+ */
+export async function addOrderItems(db, id, itemsToAdd) {
+  if (!id) throw new Error("Order ID is required");
+  if (!Array.isArray(itemsToAdd) || itemsToAdd.length === 0) {
+    throw new Error("At least one item is required");
+  }
+
+  if (isSqliteDb(db)) {
+    const currentOrder = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
+    if (!currentOrder) throw new Error("Order not found");
+
+    const now = new Date().toISOString();
+
+    await db.run("BEGIN TRANSACTION");
+    try {
+      for (const item of itemsToAdd) {
+        await db.run(
+          "INSERT INTO order_items (id, order_id, menu_item_id, name, quantity, price, special_instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [
+            crypto.randomUUID(),
+            id,
+            item.menuItemId || null,
+            item.name || "",
+            Math.max(1, Number(item.quantity) || 1),
+            Number(item.price) || 0,
+            "",
+            now,
+          ]
+        );
+      }
+
+      const allItems = await db.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
+      const newTotal = allItems.reduce((sum, row) => sum + Number(row.price || 0) * Number(row.quantity || 0), 0);
+
+      const orderUpdates = { total: newTotal, updated_at: now };
+      if (currentOrder.discount_amount) {
+        orderUpdates.final_total = Math.max(0, newTotal - Number(currentOrder.discount_amount));
+      }
+
+      const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
+      const params = [...Object.values(orderUpdates), id];
+      await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+
+      await db.run("COMMIT");
+    } catch (error) {
+      await db.run("ROLLBACK");
+      throw error;
+    }
+
+    const items = await db.all(
+      `SELECT order_items.*, categories.name AS category_name
+       FROM order_items
+       LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+       LEFT JOIN categories ON menu_items.category_id = categories.id
+       WHERE order_items.order_id = ?
+       ORDER BY order_items.created_at ASC`,
+      [id]
+    );
+    const updatedOrderRow = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
+
+    return {
+      id,
+      total: Number(updatedOrderRow.total || 0),
+      finalTotal:
+        updatedOrderRow.final_total !== null && updatedOrderRow.final_total !== undefined
+          ? Number(updatedOrderRow.final_total)
+          : updatedOrderRow.final_total,
+      items: items.map((item) => ({
+        id: item.id,
+        menuItemId: item.menu_item_id,
+        name: item.name,
+        category: item.category_name || "",
+        quantity: Number(item.quantity || 0),
+        price: Number(item.price || 0),
+        specialInstructions: item.special_instructions || "",
+      })),
+    };
+  }
+
+  const docRef = ordersCollection(db).doc(id);
+  const snapshot = await docRef.get();
+  if (!snapshot.exists) throw new Error("Order not found");
+  const currentData = snapshot.data();
+  const currentItems = Array.isArray(currentData.items) ? currentData.items : [];
+  const newItems = itemsToAdd.map((item) => ({
+    menuItemId: item.menuItemId || null,
+    name: item.name || "",
+    quantity: Math.max(1, Number(item.quantity) || 1),
+    price: Number(item.price) || 0,
+  }));
+  const mergedItems = [...currentItems, ...newItems];
+  const newTotal = mergedItems.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
+
+  const updates = { items: mergedItems, total: newTotal };
+  if (currentData.discountAmount) {
+    updates.finalTotal = Math.max(0, newTotal - Number(currentData.discountAmount));
+  }
+
+  await docRef.update(updates);
   return { id, ...updates };
 }
 
