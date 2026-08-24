@@ -8,9 +8,11 @@ import {
   getOrders,
   updateOrder,
   addOrderItems,
+  deleteOrder,
   createAdminOrder,
   getKitchenCredentials,
 } from "../services/adminService.js";
+import { createPrintJob, getPrintJob, retryPrintJob } from "../services/printerService.js";
 
 // This router is intentionally NOT behind adminAuthMiddleware.
 //
@@ -115,12 +117,69 @@ router.post("/orders/:id/items", async (req, res, next) => {
   }
 });
 
+// Cancel (permanently delete) a single order ("Cancel" button on the waiter's My Orders card)
+router.delete("/orders/:id", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Order ID is required" });
+    }
+    const result = await deleteOrder(req.app.locals.db, id);
+    res.json(buildApiResponse(result));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
 // Waiter's "Order by Captain" flow places an order directly on behalf of a
 // table/waiter, same shape as the admin order-creation endpoint.
 router.post("/orders", async (req, res, next) => {
   try {
     const order = await createAdminOrder(req.app.locals.db, req.body || {});
     res.status(201).json(buildApiResponse(order));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+// ==========================================
+// PRINTING — waiter's "Print Bill" / "Print KOT" buttons.
+//
+// The waiter's phone NEVER talks to a printer. It only creates a row in
+// the centralized print_jobs queue via this exact same createPrintJob()
+// function the Admin panel uses (see routes/admin.js) — no printer logic
+// is duplicated here. The restaurant's print connector (running on a
+// restaurant PC, not the waiter's device) picks the job up on its own.
+// ==========================================
+router.post("/print-jobs", async (req, res, next) => {
+  try {
+    const { orderId, type } = req.body || {};
+    const waiterId = req.body?.waiterId;
+    const job = await createPrintJob(req.app.locals.db, {
+      orderId,
+      type,
+      createdBy: waiterId ? `waiter:${waiterId}` : "waiter",
+    });
+    res.status(201).json(buildApiResponse(job));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+router.get("/print-jobs/:id", async (req, res, next) => {
+  try {
+    const job = await getPrintJob(req.app.locals.db, req.params.id);
+    res.json(buildApiResponse(job));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+// Waiter explicitly presses "Retry" after a failed print.
+router.post("/print-jobs/:id/retry", async (req, res, next) => {
+  try {
+    const job = await retryPrintJob(req.app.locals.db, req.params.id);
+    res.json(buildApiResponse(job));
   } catch (err) {
     next(buildApiError(err.message, err.status || 500));
   }

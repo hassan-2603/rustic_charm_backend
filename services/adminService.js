@@ -850,6 +850,50 @@ export async function addOrderItems(db, id, itemsToAdd) {
   return { id, ...updates };
 }
 
+/**
+ * Cancels (permanently deletes) a single order. Used by the red "Cancel"
+ * button on the Admin "View Details" drawer and the Waiter "My Orders" card.
+ * Removing the order row (and its items) makes it disappear from every
+ * screen that reads the orders list — Admin Orders, Waiter dashboard,
+ * Kitchen, and KOT — since they all read the same underlying data.
+ * If the order was holding a table, the table is freed the same way
+ * endSession() frees it.
+ */
+export async function deleteOrder(db, id) {
+  if (!id) throw new Error("Order ID is required");
+
+  if (isSqliteDb(db)) {
+    const order = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
+    if (!order) return { id };
+
+    await db.run("DELETE FROM order_items WHERE order_id = ?", [id]);
+    await db.run("DELETE FROM orders WHERE id = ?", [id]);
+
+    if (order.table_id) {
+      await db.run(
+        "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ? AND current_order_id = ?",
+        [new Date().toISOString(), order.table_id, id]
+      );
+    }
+
+    return { id };
+  }
+
+  const docRef = ordersCollection(db).doc(id);
+  const snapshot = await docRef.get();
+  if (!snapshot.exists) return { id };
+  const order = snapshot.data();
+  await docRef.delete();
+
+  if (order.tableId) {
+    await tablesCollection(db)
+      .doc(order.tableId)
+      .set({ occupied: false, status: "available", currentOrderId: "", currentSessionId: "" }, { merge: true });
+  }
+
+  return { id };
+}
+
 export async function generateOrderNumber(db) {
   if (isSqliteDb(db)) {
     // Use MAX() to avoid race conditions when concurrent orders are placed

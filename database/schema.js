@@ -155,6 +155,53 @@ CREATE TABLE IF NOT EXISTS menu_versions (
   version_number INTEGER NOT NULL,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Restaurant-level printer configuration. One row per printer role
+-- ('bill' | 'kot'). Configured ONCE by the admin; every waiter and admin
+-- print button reads from these same rows via the backend -- never from a
+-- device's own localStorage. last_seen_at is a heartbeat written by the
+-- one restaurant-side print connector every time it polls for jobs, so
+-- "READY" vs "OFFLINE" reflects whether the connector is actually alive,
+-- not just whether settings were saved.
+CREATE TABLE IF NOT EXISTS printers (
+  id TEXT PRIMARY KEY CHECK (id IN ('bill','kot')),
+  printer_name TEXT,
+  connection_type TEXT NOT NULL DEFAULT 'network' CHECK (connection_type IN ('network','windows')),
+  ip_address TEXT,
+  port INTEGER,
+  paper_width TEXT NOT NULL DEFAULT '80mm' CHECK (paper_width IN ('58mm','80mm')),
+  copies INTEGER NOT NULL DEFAULT 1,
+  auto_cut INTEGER NOT NULL DEFAULT 1 CHECK (auto_cut IN (0,1)),
+  auto_print INTEGER NOT NULL DEFAULT 0 CHECK (auto_print IN (0,1)),
+  last_seen_at TEXT,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Centralized print-job queue. Waiter and Admin both create rows here
+-- through the exact same service function -- neither ever talks to a
+-- printer directly. The one restaurant-side connector polls this queue
+-- over outbound HTTPS and reports results back, so the printer never has
+-- to be reachable from the internet or from any individual device.
+CREATE TABLE IF NOT EXISTS print_jobs (
+  id TEXT PRIMARY KEY,
+  order_id TEXT,
+  type TEXT NOT NULL CHECK (type IN ('BILL','KOT')),
+  printer_id TEXT NOT NULL CHECK (printer_id IN ('bill','kot')),
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','PROCESSING','PRINTED','FAILED','CANCELLED')),
+  payload TEXT NOT NULL,
+  is_test INTEGER NOT NULL DEFAULT 0 CHECK (is_test IN (0,1)),
+  created_by TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  error_message TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  claimed_at TEXT,
+  printed_at TEXT,
+  FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
 `;
 
 export async function initializeSchema(db) {
@@ -170,6 +217,25 @@ export async function initializeSchema(db) {
     } catch (err) {
       if (!String(err.message).includes("duplicate column name")) throw err;
     }
+
+    // Category-wise discount support (Food vs Alcohol) alongside the
+    // existing flat/percent discount columns. discount_mode distinguishes
+    // a plain "direct amount" discount from a category-split discount.
+    const discountColumns = [
+      "ALTER TABLE orders ADD COLUMN discount_mode TEXT",
+      "ALTER TABLE orders ADD COLUMN food_discount_percent REAL",
+      "ALTER TABLE orders ADD COLUMN alcohol_discount_percent REAL",
+      "ALTER TABLE orders ADD COLUMN food_discount_amount REAL",
+      "ALTER TABLE orders ADD COLUMN alcohol_discount_amount REAL",
+    ];
+    for (const statement of discountColumns) {
+      try {
+        await db.run(statement);
+      } catch (err) {
+        if (!String(err.message).includes("duplicate column name")) throw err;
+      }
+    }
+
     console.log("✓ Database schema initialized");
 
     // Ensure there's at least one menu version
@@ -179,6 +245,16 @@ export async function initializeSchema(db) {
       await db.run(
         "INSERT INTO menu_versions (id, version_number) VALUES (?, ?)",
         [id, 1]
+      );
+    }
+
+    // Ensure the two printer roles always exist as rows (unconfigured until
+    // the admin fills them in via Settings) so GET /printers never has to
+    // special-case a missing row.
+    for (const printerId of ["bill", "kot"]) {
+      await db.run(
+        "INSERT OR IGNORE INTO printers (id, printer_name, connection_type, paper_width, copies, auto_cut, auto_print) VALUES (?, ?, 'network', '80mm', 1, 1, 0)",
+        [printerId, printerId === "bill" ? "Bill Printer" : "KOT Printer"]
       );
     }
   } catch (err) {

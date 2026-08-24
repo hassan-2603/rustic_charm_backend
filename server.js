@@ -12,6 +12,7 @@ import healthRouter from "./routes/health.js";
 import customerRouter from "./routes/customer.js";
 import adminRouter from "./routes/admin.js";
 import staffRouter from "./routes/staff.js";
+import connectorRouter from "./routes/connector.js";
 import { getCategories, getMenuItems, addMenuItem, deleteMenuItem, getOrders } from "./services/adminService.js";
 import { createOrder } from "./services/customerService.js";
 import { getOffers as getAdminOffers, addOffer as addAdminOffer, updateOffer as updateAdminOffer, deleteOffer as deleteAdminOffer } from "./services/offerService.js";
@@ -186,6 +187,7 @@ app.use("/api/health", healthRouter);
 app.use("/api/customer", customerRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/staff", staffRouter);
+app.use("/api/connector", connectorRouter);
 
 // ==========================================
 // API ROUTES

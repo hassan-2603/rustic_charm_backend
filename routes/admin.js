@@ -55,6 +55,7 @@ import {
   deleteAllCompletedOrders,
   updateOrder,
   addOrderItems,
+  deleteOrder,
   createAdminOrder,
   getWaiters,
   getWaiterCalls,
@@ -72,6 +73,14 @@ import {
   updateOffer,
   deleteOffer,
 } from "../services/offerService.js";
+import {
+  getAllPrinterConfigs,
+  savePrinterConfig,
+  createPrintJob,
+  getPrintJob,
+  retryPrintJob,
+  listFailedJobs,
+} from "../services/printerService.js";
 
 const router = express.Router();
 
@@ -318,6 +327,20 @@ router.post("/orders/:id/items", async (req, res, next) => {
   }
 });
 
+// Cancel (permanently delete) a single order ("Cancel" button on the order details drawer)
+router.delete("/orders/:id", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Order ID is required" });
+    }
+    const result = await deleteOrder(req.app.locals.db, id);
+    res.json(buildApiResponse(result));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
 router.get("/waiters", async (req, res, next) => {
   try {
     const waiters = await getWaiters(req.app.locals.db);
@@ -477,6 +500,88 @@ router.delete("/offers/:id", async (req, res, next) => {
     res.json(buildApiResponse({ id }));
   } catch (err) {
     next(buildApiError(err.message, 500));
+  }
+});
+
+// ==========================================
+// PRINTING
+//
+// Admin configures the BILL and KOT printers ONCE here. Every print button
+// -- in the Admin panel and on every waiter's phone -- reads these same
+// rows and calls the exact same createPrintJob() function from
+// services/printerService.js; nothing about the printer is duplicated
+// between the two apps.
+// ==========================================
+router.get("/printers", async (req, res, next) => {
+  try {
+    const printers = await getAllPrinterConfigs(req.app.locals.db);
+    res.json(buildApiResponse(printers));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+router.put("/printers/:type", async (req, res, next) => {
+  try {
+    const { type } = req.params;
+    const settings = req.body || {};
+    const printer = await savePrinterConfig(req.app.locals.db, type, settings);
+    res.json(buildApiResponse(printer));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+// Test print -- goes through the exact same job queue/connector pipeline
+// as a real print, but is flagged isTest so it never touches an order.
+router.post("/printers/:type/test", async (req, res, next) => {
+  try {
+    const { type } = req.params;
+    const job = await createPrintJob(req.app.locals.db, {
+      type: type === "bill" ? "BILL" : "KOT",
+      createdBy: "admin",
+      isTest: true,
+    });
+    res.status(201).json(buildApiResponse(job));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+router.post("/print-jobs", async (req, res, next) => {
+  try {
+    const { orderId, type } = req.body || {};
+    const job = await createPrintJob(req.app.locals.db, { orderId, type, createdBy: "admin" });
+    res.status(201).json(buildApiResponse(job));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+router.get("/print-jobs/failed", async (req, res, next) => {
+  try {
+    const jobs = await listFailedJobs(req.app.locals.db);
+    res.json(buildApiResponse(jobs));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+router.get("/print-jobs/:id", async (req, res, next) => {
+  try {
+    const job = await getPrintJob(req.app.locals.db, req.params.id);
+    res.json(buildApiResponse(job));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+router.post("/print-jobs/:id/retry", async (req, res, next) => {
+  try {
+    const job = await retryPrintJob(req.app.locals.db, req.params.id);
+    res.json(buildApiResponse(job));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
   }
 });
 
