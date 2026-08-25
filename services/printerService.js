@@ -311,9 +311,9 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
   const row = await db.get("SELECT value FROM restaurant_settings WHERE key = 'kot_sections'");
   const config = row && row.value ? JSON.parse(row.value) : {}; // map of categoryId -> section name
 
-  const sectionItems = {}; // e.g. { "Food": [...], "Unassigned": [...] }
+  const sectionItems = {}; // e.g. { "Food": [...], "Bar": [...] }
   for (const item of order.items) {
-    // If no config maps this category, place it in "Unassigned"
+    // If no config maps this category, fall back to the item's category name or "Unassigned"
     const sectionName = config[item.categoryId] || "Unassigned";
     if (!sectionItems[sectionName]) sectionItems[sectionName] = [];
     sectionItems[sectionName].push(item);

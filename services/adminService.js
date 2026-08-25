@@ -541,7 +541,7 @@ export async function getOrders(db) {
     const orders = [];
     for (const row of rows) {
       const items = await db.all(
-        `SELECT order_items.*, categories.name AS category_name
+        `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
          FROM order_items
          LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
          LEFT JOIN categories ON menu_items.category_id = categories.id
@@ -586,6 +586,8 @@ export async function getOrders(db) {
           menuItemId: item.menu_item_id,
           name: item.name,
           category: item.category_name || "",
+        categoryId: item.category_id || "",
+          categoryId: item.category_id || "",
           quantity: Number(item.quantity || 0),
           price: Number(item.price || 0),
           specialInstructions: item.special_instructions || "",
@@ -798,7 +800,7 @@ export async function addOrderItems(db, id, itemsToAdd) {
     }
 
     const items = await db.all(
-      `SELECT order_items.*, categories.name AS category_name
+      `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
        FROM order_items
        LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
        LEFT JOIN categories ON menu_items.category_id = categories.id
@@ -820,6 +822,8 @@ export async function addOrderItems(db, id, itemsToAdd) {
         menuItemId: item.menu_item_id,
         name: item.name,
         category: item.category_name || "",
+        categoryId: item.category_id || "",
+          categoryId: item.category_id || "",
         quantity: Number(item.quantity || 0),
         price: Number(item.price || 0),
         specialInstructions: item.special_instructions || "",
@@ -911,7 +915,7 @@ export async function removeOrderItems(db, id, itemIds) {
     }
 
     const items = await db.all(
-      `SELECT order_items.*, categories.name AS category_name
+      `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
        FROM order_items
        LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
        LEFT JOIN categories ON menu_items.category_id = categories.id
@@ -933,6 +937,8 @@ export async function removeOrderItems(db, id, itemIds) {
         menuItemId: item.menu_item_id,
         name: item.name,
         category: item.category_name || "",
+        categoryId: item.category_id || "",
+          categoryId: item.category_id || "",
         quantity: Number(item.quantity || 0),
         price: Number(item.price || 0),
         specialInstructions: item.special_instructions || "",
