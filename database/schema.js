@@ -214,7 +214,7 @@ CREATE TABLE IF NOT EXISTS order_bill_splits (
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
 );
-
+`;
 
 export async function initializeSchema(db) {
   if (!db || typeof db.exec !== "function") {
@@ -253,7 +253,7 @@ export async function initializeSchema(db) {
     // Ensure there's at least one menu version
     const existing = await db.get("SELECT COUNT(*) as count FROM menu_versions");
     if (existing.count === 0) {
-      const id = crypto.randomUUID?.() || `version-${ Date.now() } `;
+      const id = "version-" + Date.now();
       await db.run(
         "INSERT INTO menu_versions (id, version_number) VALUES (?, ?)",
         [id, 1]
