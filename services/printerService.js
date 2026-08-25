@@ -41,11 +41,19 @@ function isAlcoholCategory(rawCategory) {
   return ALCOHOL_KEYWORDS.some((keyword) => text.includes(keyword));
 }
 
-function splitItemsByCategory(items) {
+function splitItemsByCategory(items, billSectionsConfig) {
   const foodItems = [];
   const alcoholItems = [];
   for (const item of items || []) {
-    if (isAlcoholCategory(item.category)) alcoholItems.push(item);
+    let isAlcohol = false;
+    const catId = item.categoryId || item.category_id;
+    if (billSectionsConfig && catId && billSectionsConfig[catId]) {
+      isAlcohol = billSectionsConfig[catId] === "Liquor";
+    } else {
+      isAlcohol = isAlcoholCategory(item.category);
+    }
+
+    if (isAlcohol) alcoholItems.push(item);
     else foodItems.push(item);
   }
   const sum = (list) => list.reduce((total, item) => total + Number(item.price || 0) * Number(item.quantity || 0), 0);
@@ -128,12 +136,12 @@ async function getOrderForPrint(db, orderId) {
   const order = await db.get("SELECT * FROM orders WHERE id = ?", [orderId]);
   if (!order) throw Object.assign(new Error("Order not found"), { status: 404 });
   const items = await db.all(
-    `SELECT order_items.*, categories.name AS category_name
-     FROM order_items
-     LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
-     LEFT JOIN categories ON menu_items.category_id = categories.id
-     WHERE order_items.order_id = ?
-     ORDER BY order_items.created_at ASC`,
+    `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
+       FROM order_items
+       LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+       LEFT JOIN categories ON menu_items.category_id = categories.id
+       WHERE order_items.order_id = ?
+       ORDER BY order_items.created_at ASC`,
     [orderId]
   );
   return {
@@ -155,14 +163,15 @@ async function getOrderForPrint(db, orderId) {
     items: items.map((item) => ({
       name: item.name,
       category: item.category_name || "",
+      categoryId: item.category_id || "",
       quantity: Number(item.quantity || 0),
       price: Number(item.price || 0),
     })),
   };
 }
 
-function buildBillPayload(order) {
-  const { foodItems, alcoholItems, foodTotal, alcoholTotal } = splitItemsByCategory(order.items);
+function buildBillPayload(order, billSectionsConfig) {
+  const { foodItems, alcoholItems, foodTotal, alcoholTotal } = splitItemsByCategory(order.items, billSectionsConfig);
   const toLine = (item) => ({ name: item.name, quantity: item.quantity, price: item.price, amount: item.price * item.quantity });
   const isCategoryDiscount = order.discountMode === "category";
   return {
@@ -235,25 +244,74 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
     throw Object.assign(new Error(`The ${normalizedType === "BILL" ? "Bill" : "KOT"} printer has not been configured yet. Ask an admin to set it up in Printer Settings.`), { status: 409 });
   }
 
-  let payload;
+  const now = new Date().toISOString();
+
   if (isTest) {
-    payload = { test: true };
-  } else {
-    if (!orderId) throw Object.assign(new Error("orderId is required"), { status: 400 });
-    const order = await getOrderForPrint(db, orderId);
-    payload = normalizedType === "BILL" ? { bill: buildBillPayload(order) } : { kot: buildKotPayload(order) };
+    const payload = { test: true };
+    const id = crypto.randomUUID();
+    await db.run(
+      `INSERT INTO print_jobs (id, order_id, type, printer_id, status, payload, is_test, created_by, attempts, max_attempts, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, 0, ?, ?, ?)`,
+      [id, null, normalizedType, printerId, JSON.stringify(payload), 1, createdBy || null, DEFAULT_MAX_ATTEMPTS, now, now]
+    );
+    const row = await db.get("SELECT * FROM print_jobs WHERE id = ?", [id]);
+    return rowToJob(row);
   }
 
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await db.run(
-    `INSERT INTO print_jobs (id, order_id, type, printer_id, status, payload, is_test, created_by, attempts, max_attempts, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, 0, ?, ?, ?)`,
-    [id, orderId || null, normalizedType, printerId, JSON.stringify(payload), isTest ? 1 : 0, createdBy || null, DEFAULT_MAX_ATTEMPTS, now, now]
-  );
+  if (!orderId) throw Object.assign(new Error("orderId is required"), { status: 400 });
+  const order = await getOrderForPrint(db, orderId);
 
-  const row = await db.get("SELECT * FROM print_jobs WHERE id = ?", [id]);
-  return rowToJob(row);
+  if (normalizedType === "BILL") {
+    const configRow = await db.get("SELECT value FROM restaurant_settings WHERE key = 'bill_sections'");
+    const billSectionsConfig = configRow && configRow.value ? JSON.parse(configRow.value) : {};
+
+    const id = crypto.randomUUID();
+    const payload = { bill: buildBillPayload(order, billSectionsConfig) };
+    await db.run(
+      `INSERT INTO print_jobs (id, order_id, type, printer_id, status, payload, is_test, created_by, attempts, max_attempts, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, 0, ?, ?, ?)`,
+      [id, orderId, normalizedType, printerId, JSON.stringify(payload), 0, createdBy || null, DEFAULT_MAX_ATTEMPTS, now, now]
+    );
+    const row = await db.get("SELECT * FROM print_jobs WHERE id = ?", [id]);
+    return rowToJob(row);
+  }
+
+  // KOT Splitting Logic
+  const row = await db.get("SELECT value FROM restaurant_settings WHERE key = 'kot_sections'");
+  const config = row && row.value ? JSON.parse(row.value) : {}; // map of categoryId -> section name
+
+  const sectionItems = {}; // e.g. { "Food": [...], "Unassigned": [...] }
+  for (const item of order.items) {
+    // If no config maps this category, place it in "Unassigned"
+    const sectionName = config[item.categoryId] || "Unassigned";
+    if (!sectionItems[sectionName]) sectionItems[sectionName] = [];
+    sectionItems[sectionName].push(item);
+  }
+
+  const keys = Object.keys(sectionItems);
+  if (keys.length === 0) {
+    return []; // Nothing to print
+  }
+
+  const createdJobs = [];
+  for (const sectionName of keys) {
+    const sectionItemsList = sectionItems[sectionName];
+    // We attach the sectionName to the payload so the connector can optionally print it as a heading
+    const kotPayload = buildKotPayload({ ...order, items: sectionItemsList });
+    kotPayload.section = sectionName;
+
+    const id = crypto.randomUUID();
+    await db.run(
+      `INSERT INTO print_jobs (id, order_id, type, printer_id, status, payload, is_test, created_by, attempts, max_attempts, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, 0, ?, ?, ?)`,
+      [id, orderId, normalizedType, printerId, JSON.stringify({ kot: kotPayload }), 0, createdBy || null, DEFAULT_MAX_ATTEMPTS, now, now]
+    );
+    const row = await db.get("SELECT * FROM print_jobs WHERE id = ?", [id]);
+    createdJobs.push(rowToJob(row));
+  }
+
+  // Return the array of print jobs back to the caller
+  return createdJobs;
 }
 
 export async function getPrintJob(db, jobId) {

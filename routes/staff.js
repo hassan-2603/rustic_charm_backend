@@ -8,7 +8,10 @@ import {
   getOrders,
   updateOrder,
   addOrderItems,
+  removeOrderItems,
   deleteOrder,
+  saveOrderSplits,
+  getOrderSplits,
   createAdminOrder,
   getKitchenCredentials,
 } from "../services/adminService.js";
@@ -117,6 +120,24 @@ router.post("/orders/:id/items", async (req, res, next) => {
   }
 });
 
+// Remove item(s) from an existing order ("Remove Item" button on the waiter's My Orders card)
+router.delete("/orders/:id/items", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { itemIds } = req.body || {};
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Order ID is required" });
+    }
+    if (!Array.isArray(itemIds) || itemIds.length === 0) {
+      return res.status(400).json({ ok: false, error: "At least one item is required" });
+    }
+    const updatedOrder = await removeOrderItems(req.app.locals.db, id, itemIds);
+    res.json(buildApiResponse(updatedOrder));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
 // Cancel (permanently delete) a single order ("Cancel" button on the waiter's My Orders card)
 router.delete("/orders/:id", async (req, res, next) => {
   try {
@@ -182,6 +203,29 @@ router.post("/print-jobs/:id/retry", async (req, res, next) => {
     res.json(buildApiResponse(job));
   } catch (err) {
     next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+
+// ==========================================
+// ORDER BILL SPLITS
+// ==========================================
+router.get("/orders/:id/splits", async (req, res, next) => {
+  try {
+    const splits = await getOrderSplits(req.app.locals.db, req.params.id);
+    res.json(buildApiResponse(splits));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
+router.post("/orders/:id/splits", async (req, res, next) => {
+  try {
+    const { splits } = req.body || {};
+    const result = await saveOrderSplits(req.app.locals.db, req.params.id, splits || []);
+    res.status(201).json(buildApiResponse(result));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
   }
 });
 

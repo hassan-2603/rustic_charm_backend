@@ -202,7 +202,19 @@ CREATE TABLE IF NOT EXISTS print_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
-`;
+  
+CREATE TABLE IF NOT EXISTS order_bill_splits (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  bill_number INTEGER NOT NULL,
+  items_json TEXT NOT NULL,
+  subtotal REAL NOT NULL DEFAULT 0,
+  tax REAL NOT NULL DEFAULT 0,
+  total REAL NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+);
+
 
 export async function initializeSchema(db) {
   if (!db || typeof db.exec !== "function") {
@@ -241,7 +253,7 @@ export async function initializeSchema(db) {
     // Ensure there's at least one menu version
     const existing = await db.get("SELECT COUNT(*) as count FROM menu_versions");
     if (existing.count === 0) {
-      const id = crypto.randomUUID?.() || `version-${Date.now()}`;
+      const id = crypto.randomUUID?.() || `version-${ Date.now() } `;
       await db.run(
         "INSERT INTO menu_versions (id, version_number) VALUES (?, ?)",
         [id, 1]

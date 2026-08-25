@@ -851,6 +851,113 @@ export async function addOrderItems(db, id, itemsToAdd) {
 }
 
 /**
+ * Removes one or more items from an existing order (used by the "Remove
+ * Item" flow on both the Admin "View Details" drawer and the Waiter "My
+ * Orders" card). Mirrors addOrderItems -- only deletes the matching
+ * order_items rows and recalculates total/finalTotal; never touches any
+ * other order field. Refuses to remove every item on an order (the order
+ * should be cancelled instead if nothing on it is left).
+ */
+export async function removeOrderItems(db, id, itemIds) {
+  if (!id) throw new Error("Order ID is required");
+  if (!Array.isArray(itemIds) || itemIds.length === 0) {
+    throw new Error("At least one item is required");
+  }
+
+  if (isSqliteDb(db)) {
+    const currentOrder = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
+    if (!currentOrder) throw new Error("Order not found");
+
+    const now = new Date().toISOString();
+
+    await db.run("BEGIN TRANSACTION");
+    try {
+      const placeholders = itemIds.map(() => "?").join(", ");
+      await db.run(
+        `DELETE FROM order_items WHERE order_id = ? AND id IN (${placeholders})`,
+        [id, ...itemIds]
+      );
+
+      const remaining = await db.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
+      if (remaining.length === 0) {
+        throw new Error("Cannot remove every item from an order \u2014 cancel the order instead if it's no longer needed.");
+      }
+
+      const newTotal = remaining.reduce((sum, row) => sum + Number(row.price || 0) * Number(row.quantity || 0), 0);
+
+      const orderUpdates = { total: newTotal, updated_at: now };
+      if (currentOrder.discount_amount) {
+        orderUpdates.final_total = Math.max(0, newTotal - Number(currentOrder.discount_amount));
+      }
+
+      const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
+      const params = [...Object.values(orderUpdates), id];
+      await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+
+      await db.run("COMMIT");
+    } catch (error) {
+      await db.run("ROLLBACK");
+      throw error;
+    }
+
+    const items = await db.all(
+      `SELECT order_items.*, categories.name AS category_name
+       FROM order_items
+       LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+       LEFT JOIN categories ON menu_items.category_id = categories.id
+       WHERE order_items.order_id = ?
+       ORDER BY order_items.created_at ASC`,
+      [id]
+    );
+    const updatedOrderRow = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
+
+    return {
+      id,
+      total: Number(updatedOrderRow.total || 0),
+      finalTotal:
+        updatedOrderRow.final_total !== null && updatedOrderRow.final_total !== undefined
+          ? Number(updatedOrderRow.final_total)
+          : updatedOrderRow.final_total,
+      items: items.map((item) => ({
+        id: item.id,
+        menuItemId: item.menu_item_id,
+        name: item.name,
+        category: item.category_name || "",
+        quantity: Number(item.quantity || 0),
+        price: Number(item.price || 0),
+        specialInstructions: item.special_instructions || "",
+      })),
+    };
+  }
+
+  const docRef2 = ordersCollection(db).doc(id);
+  const snapshot2 = await docRef2.get();
+  if (!snapshot2.exists) throw new Error("Order not found");
+  const currentData2 = snapshot2.data();
+  const currentItems2 = Array.isArray(currentData2.items) ? currentData2.items : [];
+
+  const idSet = new Set(itemIds.map(String));
+  const remainingItems = currentItems2.filter((item, index) => {
+    const itemKey = item.id !== undefined ? String(item.id) : String(index);
+    return !idSet.has(itemKey);
+  });
+
+  if (remainingItems.length === 0) {
+    throw new Error("Cannot remove every item from an order \u2014 cancel the order instead if it's no longer needed.");
+  }
+
+  const newTotal2 = remainingItems.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
+
+  const updates2 = { items: remainingItems, total: newTotal2 };
+  if (currentData2.discountAmount) {
+    updates2.finalTotal = Math.max(0, newTotal2 - Number(currentData2.discountAmount));
+  }
+
+  await docRef2.update(updates2);
+  return { id, ...updates2 };
+}
+
+/**
  * Cancels (permanently deletes) a single order. Used by the red "Cancel"
  * button on the Admin "View Details" drawer and the Waiter "My Orders" card.
  * Removing the order row (and its items) makes it disappear from every
@@ -1046,4 +1153,89 @@ export async function getMenuVersion(db) {
   }
   const row = await db.get("SELECT value FROM restaurant_settings WHERE key = 'menu_version' LIMIT 1");
   return row && row.value ? Number(row.value) : 1;
+}
+
+
+export async function saveOrderSplits(db, orderId, splits) {
+  if (!orderId) throw new Error("Order ID is required");
+  if (isSqliteDb(db)) {
+    await db.run("BEGIN TRANSACTION");
+    try {
+      await db.run("DELETE FROM order_bill_splits WHERE order_id = ?", [orderId]);
+      const now = new Date().toISOString();
+      for (const split of splits) {
+        await db.run(
+          "INSERT INTO order_bill_splits (id, order_id, bill_number, items_json, subtotal, tax, total, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [
+            crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(),
+            orderId,
+            split.billNumber || 1,
+            JSON.stringify(split.items || []),
+            split.subtotal || 0,
+            split.tax || 0,
+            split.total || 0,
+            now
+          ]
+        );
+      }
+      await db.run("COMMIT");
+    } catch (err) {
+      await db.run("ROLLBACK");
+      throw err;
+    }
+    return { orderId, splits };
+  } else {
+    throw new Error("Splits only supported on SQLite");
+  }
+}
+
+export async function getOrderSplits(db, orderId) {
+  if (isSqliteDb(db)) {
+    const rows = await db.all("SELECT * FROM order_bill_splits WHERE order_id = ? ORDER BY bill_number ASC", [orderId]);
+    return rows.map(r => ({
+      id: r.id,
+      orderId: r.order_id,
+      billNumber: r.bill_number,
+      items: JSON.parse(r.items_json),
+      subtotal: r.subtotal,
+      tax: r.tax,
+      total: r.total,
+      createdAt: r.created_at
+    }));
+  }
+  return [];
+}
+
+export async function getKotSections(db) {
+  if (!isSqliteDb(db)) return {};
+  const row = await db.get("SELECT value FROM restaurant_settings WHERE key = 'kot_sections'");
+  return row && row.value ? JSON.parse(row.value) : {};
+}
+
+export async function setKotSections(db, config) {
+  if (!isSqliteDb(db)) return config;
+  const json = JSON.stringify(config || {});
+  const now = new Date().toISOString();
+  await db.run(
+    "INSERT INTO restaurant_settings (id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    ["kot_sections", "kot_sections", json, now]
+  );
+  return config;
+}
+
+export async function getBillSections(db) {
+  if (!isSqliteDb(db)) return {};
+  const row = await db.get("SELECT value FROM restaurant_settings WHERE key = 'bill_sections'");
+  return row && row.value ? JSON.parse(row.value) : {};
+}
+
+export async function setBillSections(db, config) {
+  if (!isSqliteDb(db)) return config;
+  const json = JSON.stringify(config || {});
+  const now = new Date().toISOString();
+  await db.run(
+    "INSERT INTO restaurant_settings (id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    ["bill_sections", "bill_sections", json, now]
+  );
+  return config;
 }

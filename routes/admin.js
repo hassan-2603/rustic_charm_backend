@@ -55,7 +55,10 @@ import {
   deleteAllCompletedOrders,
   updateOrder,
   addOrderItems,
+  removeOrderItems,
   deleteOrder,
+  saveOrderSplits,
+  getOrderSplits,
   createAdminOrder,
   getWaiters,
   getWaiterCalls,
@@ -66,6 +69,10 @@ import {
   updateKitchenPassword,
   getMenuVersion,
   incrementMenuVersion,
+  getKotSections,
+  setKotSections,
+  getBillSections,
+  setBillSections
 } from "../services/adminService.js";
 import {
   getOffers,
@@ -327,6 +334,24 @@ router.post("/orders/:id/items", async (req, res, next) => {
   }
 });
 
+// Remove item(s) from an existing order ("Remove Item" button on the order details drawer)
+router.delete("/orders/:id/items", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { itemIds } = req.body || {};
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Order ID is required" });
+    }
+    if (!Array.isArray(itemIds) || itemIds.length === 0) {
+      return res.status(400).json({ ok: false, error: "At least one item is required" });
+    }
+    const updatedOrder = await removeOrderItems(req.app.locals.db, id, itemIds);
+    res.json(buildApiResponse(updatedOrder));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
 // Cancel (permanently delete) a single order ("Cancel" button on the order details drawer)
 router.delete("/orders/:id", async (req, res, next) => {
   try {
@@ -434,6 +459,44 @@ router.put("/settings/menu-version", async (req, res, next) => {
   try {
     const next = await incrementMenuVersion(req.app.locals.db);
     res.json(buildApiResponse({ menuVersion: next }));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
+router.get("/settings/kot-sections", async (req, res, next) => {
+  try {
+    const config = await getKotSections(req.app.locals.db);
+    res.json(buildApiResponse(config));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
+router.put("/settings/kot-sections", async (req, res, next) => {
+  try {
+    const config = req.body || {};
+    const updated = await setKotSections(req.app.locals.db, config);
+    res.json(buildApiResponse(updated));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
+router.get("/settings/bill-sections", async (req, res, next) => {
+  try {
+    const config = await getBillSections(req.app.locals.db);
+    res.json(buildApiResponse(config));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
+router.put("/settings/bill-sections", async (req, res, next) => {
+  try {
+    const config = req.body || {};
+    const updated = await setBillSections(req.app.locals.db, config);
+    res.json(buildApiResponse(updated));
   } catch (err) {
     next(buildApiError(err.message, 500));
   }
