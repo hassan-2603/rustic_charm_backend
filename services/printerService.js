@@ -265,15 +265,46 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
     const configRow = await db.get("SELECT value FROM restaurant_settings WHERE key = 'bill_sections'");
     const billSectionsConfig = configRow && configRow.value ? JSON.parse(configRow.value) : {};
 
-    const id = crypto.randomUUID();
-    const payload = { bill: buildBillPayload(order, billSectionsConfig) };
-    await db.run(
-      `INSERT INTO print_jobs (id, order_id, type, printer_id, status, payload, is_test, created_by, attempts, max_attempts, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, 0, ?, ?, ?)`,
-      [id, orderId, normalizedType, printerId, JSON.stringify(payload), 0, createdBy || null, DEFAULT_MAX_ATTEMPTS, now, now]
-    );
-    const row = await db.get("SELECT * FROM print_jobs WHERE id = ?", [id]);
-    return rowToJob(row);
+    const splits = await db.all("SELECT * FROM order_bill_splits WHERE order_id = ? ORDER BY bill_number ASC", [orderId]);
+    const billPayloads = [];
+
+    if (splits && splits.length > 0) {
+      for (const split of splits) {
+        let items = [];
+        try {
+          items = JSON.parse(split.items_json || "[]");
+        } catch (e) { }
+
+        const splitOrder = {
+          ...order,
+          items: items,
+          total: Number(split.subtotal || 0),
+          finalTotal: Number(split.total || split.subtotal || 0),
+          discountAmount: 0,
+        };
+
+        const payloadObj = buildBillPayload(splitOrder, billSectionsConfig);
+        payloadObj.splitLabel = `Split ${split.bill_number} of ${splits.length}`;
+        billPayloads.push(payloadObj);
+      }
+    } else {
+      billPayloads.push(buildBillPayload(order, billSectionsConfig));
+    }
+
+    const createdJobs = [];
+    for (const payloadObj of billPayloads) {
+      const id = crypto.randomUUID();
+      const payload = { bill: payloadObj };
+      await db.run(
+        `INSERT INTO print_jobs (id, order_id, type, printer_id, status, payload, is_test, created_by, attempts, max_attempts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, 0, ?, ?, ?)`,
+        [id, orderId, normalizedType, printerId, JSON.stringify(payload), 0, createdBy || null, DEFAULT_MAX_ATTEMPTS, now, now]
+      );
+      const row = await db.get("SELECT * FROM print_jobs WHERE id = ?", [id]);
+      createdJobs.push(rowToJob(row));
+    }
+
+    return createdJobs.length === 1 ? createdJobs[0] : createdJobs;
   }
 
   // KOT Splitting Logic
