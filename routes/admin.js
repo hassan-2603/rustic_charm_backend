@@ -325,7 +325,7 @@ router.get("/orders/:id/splits", async (req, res, next) => {
   }
 });
 
-router.put("/orders/:id/splits", async (req, res, next) => {
+router.post("/orders/:id/splits", async (req, res, next) => {
   try {
     const { splits } = req.body || {};
     const result = await saveOrderSplits(req.app.locals.db, req.params.id, splits || []);

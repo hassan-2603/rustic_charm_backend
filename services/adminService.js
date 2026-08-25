@@ -872,11 +872,21 @@ export async function removeOrderItems(db, id, itemIds) {
 
     await db.run("BEGIN TRANSACTION");
     try {
-      const placeholders = itemIds.map(() => "?").join(", ");
-      await db.run(
-        `DELETE FROM order_items WHERE order_id = ? AND id IN (${placeholders})`,
-        [id, ...itemIds]
-      );
+      for (const item of itemIds) {
+        const itemId = typeof item === 'string' ? item : item.id;
+        const qtyToRemove = typeof item === 'object' && item.quantity ? Number(item.quantity) : null;
+
+        if (qtyToRemove && qtyToRemove > 0) {
+          const row = await db.get("SELECT quantity FROM order_items WHERE order_id = ? AND id = ?", [id, itemId]);
+          if (row && row.quantity > qtyToRemove) {
+            await db.run("UPDATE order_items SET quantity = quantity - ? WHERE order_id = ? AND id = ?", [qtyToRemove, id, itemId]);
+          } else {
+            await db.run("DELETE FROM order_items WHERE order_id = ? AND id = ?", [id, itemId]);
+          }
+        } else {
+          await db.run("DELETE FROM order_items WHERE order_id = ? AND id = ?", [id, itemId]);
+        }
+      }
 
       const remaining = await db.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
       if (remaining.length === 0) {
@@ -936,10 +946,27 @@ export async function removeOrderItems(db, id, itemIds) {
   const currentData2 = snapshot2.data();
   const currentItems2 = Array.isArray(currentData2.items) ? currentData2.items : [];
 
-  const idSet = new Set(itemIds.map(String));
-  const remainingItems = currentItems2.filter((item, index) => {
+  const idSet = new Set();
+  const qtyMap = {};
+  for (const item of itemIds) {
+    const itemId = typeof item === 'string' ? item : item.id;
+    idSet.add(String(itemId));
+    if (typeof item === 'object' && item.quantity) {
+      qtyMap[String(itemId)] = Number(item.quantity);
+    }
+  }
+
+  const remainingItems = [];
+  currentItems2.forEach((item, index) => {
     const itemKey = item.id !== undefined ? String(item.id) : String(index);
-    return !idSet.has(itemKey);
+    if (idSet.has(itemKey)) {
+      const removeQty = qtyMap[itemKey];
+      if (removeQty && removeQty > 0 && Number(item.quantity) > removeQty) {
+        remainingItems.push({ ...item, quantity: Number(item.quantity) - removeQty });
+      }
+    } else {
+      remainingItems.push(item);
+    }
   });
 
   if (remainingItems.length === 0) {
