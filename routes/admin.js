@@ -316,6 +316,25 @@ router.put("/orders/:id", async (req, res, next) => {
   }
 });
 
+router.get("/orders/:id/splits", async (req, res, next) => {
+  try {
+    const splits = await getOrderSplits(req.app.locals.db, req.params.id);
+    res.json(buildApiResponse(splits));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
+router.put("/orders/:id/splits", async (req, res, next) => {
+  try {
+    const { splits } = req.body || {};
+    const result = await saveOrderSplits(req.app.locals.db, req.params.id, splits || []);
+    res.json(buildApiResponse(result));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
 // Add item(s) to an existing order ("Add Item" button on the order details drawer)
 router.post("/orders/:id/items", async (req, res, next) => {
   try {
