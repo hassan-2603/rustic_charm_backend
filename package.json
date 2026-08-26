@@ -21,6 +21,7 @@
     "firebase-admin": "^13.10.0",
     "google-translate-api-x": "^10.7.3",
     "multer": "^2.2.0",
+    "mysql2": "^3.24.2",
     "pdf-parse": "^2.4.5",
     "pdfreader": "^1.2.11",
     "sqlite3": "^5.1.7",

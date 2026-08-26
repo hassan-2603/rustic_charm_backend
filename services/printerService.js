@@ -100,16 +100,16 @@ export async function savePrinterConfig(db, printerId, settings) {
   await db.run(
     `INSERT INTO printers (id, printer_name, connection_type, ip_address, port, paper_width, copies, auto_cut, auto_print, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
-       printer_name = excluded.printer_name,
-       connection_type = excluded.connection_type,
-       ip_address = excluded.ip_address,
-       port = excluded.port,
-       paper_width = excluded.paper_width,
-       copies = excluded.copies,
-       auto_cut = excluded.auto_cut,
-       auto_print = excluded.auto_print,
-       updated_at = excluded.updated_at`,
+     ON DUPLICATE KEY UPDATE
+       printer_name = VALUES(printer_name),
+       connection_type = VALUES(connection_type),
+       ip_address = VALUES(ip_address),
+       port = VALUES(port),
+       paper_width = VALUES(paper_width),
+       copies = VALUES(copies),
+       auto_cut = VALUES(auto_cut),
+       auto_print = VALUES(auto_print),
+       updated_at = VALUES(updated_at)`,
     [
       printerId,
       settings.printerName || "",
@@ -160,7 +160,10 @@ async function getOrderForPrint(db, orderId) {
     alcoholDiscountPercent: Number(order.alcohol_discount_percent || 0),
     foodDiscountAmount: Number(order.food_discount_amount || 0),
     alcoholDiscountAmount: Number(order.alcohol_discount_amount || 0),
+    description: order.description,
+    lastPrintedItems: order.last_printed_items ? (typeof order.last_printed_items === "string" ? JSON.parse(order.last_printed_items) : order.last_printed_items) : null,
     items: items.map((item) => ({
+      id: item.id,
       name: item.name,
       category: item.category_name || "",
       categoryId: item.category_id || "",
@@ -204,6 +207,9 @@ function buildKotPayload(order) {
     waiterName: order.waiterName,
     date: new Date(order.createdAt || Date.now()).toLocaleString(),
     items: order.items.map((item) => ({ name: item.name, quantity: item.quantity })),
+    addedItems: order.addedItems ? order.addedItems.map((item) => ({ name: item.name, quantity: item.quantity })) : [],
+    removedItems: order.removedItems ? order.removedItems.map((item) => ({ name: item.name, quantity: item.quantity })) : [],
+    description: order.description,
   };
 }
 
@@ -262,7 +268,7 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
   const order = await getOrderForPrint(db, orderId);
 
   if (normalizedType === "BILL") {
-    const configRow = await db.get("SELECT value FROM restaurant_settings WHERE key = 'bill_sections'");
+    const configRow = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections'");
     const billSectionsConfig = configRow && configRow.value ? JSON.parse(configRow.value) : {};
 
     const splits = await db.all("SELECT * FROM order_bill_splits WHERE order_id = ? ORDER BY bill_number ASC", [orderId]);
@@ -308,27 +314,87 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
   }
 
   // KOT Splitting Logic
-  const row = await db.get("SELECT value FROM restaurant_settings WHERE key = 'kot_sections'");
+  const row = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'kot_sections'");
   const config = row && row.value ? JSON.parse(row.value) : {}; // map of categoryId -> section name
 
-  const sectionItems = {}; // e.g. { "Food": [...], "Bar": [...] }
-  for (const item of order.items) {
-    // If no config maps this category, fall back to the item's category name or "Unassigned"
-    const sectionName = config[item.categoryId] || "Unassigned";
-    if (!sectionItems[sectionName]) sectionItems[sectionName] = [];
-    sectionItems[sectionName].push(item);
+  let addedItemsOverall = [];
+  let removedItemsOverall = [];
+  let isDiffPrint = false;
+
+  if (order.lastPrintedItems) {
+    isDiffPrint = true;
+    const currentItemMap = {};
+    for (const item of order.items) {
+      currentItemMap[item.id] = item;
+    }
+    const lastItemMap = {};
+    for (const item of order.lastPrintedItems) {
+      lastItemMap[item.id] = item;
+    }
+
+    // Check additions or quantity increases
+    for (const item of order.items) {
+      const prev = lastItemMap[item.id];
+      if (!prev) {
+        addedItemsOverall.push({ ...item });
+      } else if (item.quantity > prev.quantity) {
+        addedItemsOverall.push({ ...item, quantity: item.quantity - prev.quantity });
+      }
+    }
+
+    // Check removals or quantity decreases
+    for (const item of order.lastPrintedItems) {
+      const cur = currentItemMap[item.id];
+      if (!cur) {
+        removedItemsOverall.push({ ...item });
+      } else if (cur.quantity < item.quantity) {
+        removedItemsOverall.push({ ...item, quantity: item.quantity - cur.quantity });
+      }
+    }
+
+    if (addedItemsOverall.length === 0 && removedItemsOverall.length === 0) {
+      isDiffPrint = false; // Just do a full reprint if absolutely no changes
+    }
   }
 
-  const keys = Object.keys(sectionItems);
+  const sectionItems = {}; // e.g. { "Food": [...], "Bar": [...] }
+  const sectionAddedItems = {};
+  const sectionRemovedItems = {};
+
+  const processItemIntoSection = (item, mapToUpdate) => {
+    const sectionName = config[item.categoryId] || "Unassigned";
+    if (!mapToUpdate[sectionName]) mapToUpdate[sectionName] = [];
+    mapToUpdate[sectionName].push(item);
+  };
+
+  if (isDiffPrint) {
+    for (const item of addedItemsOverall) processItemIntoSection(item, sectionAddedItems);
+    for (const item of removedItemsOverall) processItemIntoSection(item, sectionRemovedItems);
+  } else {
+    for (const item of order.items) processItemIntoSection(item, sectionItems);
+  }
+
+  const keys = Array.from(new Set([
+    ...Object.keys(sectionItems),
+    ...Object.keys(sectionAddedItems),
+    ...Object.keys(sectionRemovedItems)
+  ]));
   if (keys.length === 0) {
     return []; // Nothing to print
   }
 
   const createdJobs = [];
   for (const sectionName of keys) {
-    const sectionItemsList = sectionItems[sectionName];
-    // We attach the sectionName to the payload so the connector can optionally print it as a heading
-    const kotPayload = buildKotPayload({ ...order, items: sectionItemsList });
+    const sectionItemsList = sectionItems[sectionName] || [];
+    const sectionAddedList = sectionAddedItems[sectionName] || [];
+    const sectionRemovedList = sectionRemovedItems[sectionName] || [];
+
+    const kotPayload = buildKotPayload({
+      ...order,
+      items: sectionItemsList,
+      addedItems: sectionAddedList,
+      removedItems: sectionRemovedList
+    });
     kotPayload.section = sectionName;
 
     const id = crypto.randomUUID();
@@ -340,6 +406,9 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
     const row = await db.get("SELECT * FROM print_jobs WHERE id = ?", [id]);
     createdJobs.push(rowToJob(row));
   }
+
+  // Update last_printed_items for future diffs
+  await db.run("UPDATE orders SET last_printed_items = ? WHERE id = ?", [JSON.stringify(order.items), orderId]);
 
   // Return the array of print jobs back to the caller
   return createdJobs;

@@ -9,6 +9,7 @@ import {
   updateOrder,
   addOrderItems,
   removeOrderItems,
+  updateOrderItemPrices,
   deleteOrder,
   saveOrderSplits,
   getOrderSplits,
@@ -147,6 +148,24 @@ router.delete("/orders/:id", async (req, res, next) => {
     }
     const result = await deleteOrder(req.app.locals.db, id);
     res.json(buildApiResponse(result));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
+// Update order item prices
+router.put("/orders/:id/items/prices", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { updates } = req.body || {};
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Order ID is required" });
+    }
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return res.status(400).json({ ok: false, error: "At least one item price update is required" });
+    }
+    const updatedOrder = await updateOrderItemPrices(req.app.locals.db, id, updates);
+    res.json(buildApiResponse(updatedOrder));
   } catch (err) {
     next(buildApiError(err.message, 500));
   }

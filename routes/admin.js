@@ -56,6 +56,7 @@ import {
   updateOrder,
   addOrderItems,
   removeOrderItems,
+  updateOrderItemPrices,
   deleteOrder,
   saveOrderSplits,
   getOrderSplits,
@@ -330,6 +331,24 @@ router.post("/orders/:id/splits", async (req, res, next) => {
     const { splits } = req.body || {};
     const result = await saveOrderSplits(req.app.locals.db, req.params.id, splits || []);
     res.json(buildApiResponse(result));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
+// Update order item prices (e.g. for custom discounting/editing prices without changing menu)
+router.put("/orders/:id/items/prices", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { updates } = req.body || {};
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Order ID is required" });
+    }
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return res.status(400).json({ ok: false, error: "At least one item price update is required" });
+    }
+    const updatedOrder = await updateOrderItemPrices(req.app.locals.db, id, updates);
+    res.json(buildApiResponse(updatedOrder));
   } catch (err) {
     next(buildApiError(err.message, 500));
   }

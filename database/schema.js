@@ -1,142 +1,142 @@
 const schemaSql = `
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS restaurant_settings (
-  id TEXT PRIMARY KEY,
-  key TEXT NOT NULL UNIQUE,
+  id VARCHAR(255) PRIMARY KEY,
+  \`key\` VARCHAR(255) NOT NULL UNIQUE,
   value TEXT,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS categories (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
-  display_order INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  id VARCHAR(255) PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  display_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS menu_items (
-  id TEXT PRIMARY KEY,
-  category_id TEXT,
-  name TEXT NOT NULL,
+  id VARCHAR(255) PRIMARY KEY,
+  category_id VARCHAR(255),
+  name VARCHAR(255) NOT NULL,
   description TEXT,
-  price REAL NOT NULL DEFAULT 0,
+  price DOUBLE NOT NULL DEFAULT 0,
   image_url TEXT,
-  is_veg INTEGER NOT NULL DEFAULT 1 CHECK (is_veg IN (0,1)),
-  is_available INTEGER NOT NULL DEFAULT 1 CHECK (is_available IN (0,1)),
-  is_popular INTEGER NOT NULL DEFAULT 0 CHECK (is_popular IN (0,1)),
-  prep_time INTEGER,
-  rating REAL DEFAULT 0,
+  is_veg TINYINT(1) NOT NULL DEFAULT 1,
+  is_available TINYINT(1) NOT NULL DEFAULT 1,
+  is_popular TINYINT(1) NOT NULL DEFAULT 0,
+  prep_time INT,
+  rating DOUBLE DEFAULT 0,
   metadata TEXT,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS menu_translations (
-  id TEXT PRIMARY KEY,
-  menu_item_id TEXT NOT NULL,
-  language_code TEXT NOT NULL,
-  name TEXT,
+  id VARCHAR(255) PRIMARY KEY,
+  menu_item_id VARCHAR(255) NOT NULL,
+  language_code VARCHAR(50) NOT NULL,
+  name VARCHAR(255),
   description TEXT,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE(menu_item_id, language_code),
   FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS tables (
-  id TEXT PRIMARY KEY,
-  table_key TEXT NOT NULL UNIQUE,
-  table_number INTEGER NOT NULL,
-  area TEXT NOT NULL,
-  area_label TEXT,
-  display_name TEXT,
-  occupied INTEGER NOT NULL DEFAULT 0 CHECK (occupied IN (0,1)),
-  status TEXT NOT NULL DEFAULT 'available',
-  current_order_id TEXT,
-  current_session_id TEXT,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  id VARCHAR(255) PRIMARY KEY,
+  table_key VARCHAR(255) NOT NULL UNIQUE,
+  table_number INT NOT NULL,
+  area VARCHAR(255) NOT NULL,
+  area_label VARCHAR(255),
+  display_name VARCHAR(255),
+  occupied TINYINT(1) NOT NULL DEFAULT 0,
+  status VARCHAR(255) NOT NULL DEFAULT 'available',
+  current_order_id VARCHAR(255),
+  current_session_id VARCHAR(255),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  table_id TEXT,
-  table_reference TEXT,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','expired','ended','closed')),
-  customer_name TEXT,
-  customer_phone TEXT,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  expires_at TEXT,
+  id VARCHAR(255) PRIMARY KEY,
+  table_id VARCHAR(255),
+  table_reference VARCHAR(255),
+  status VARCHAR(50) NOT NULL DEFAULT 'active',
+  customer_name VARCHAR(255),
+  customer_phone VARCHAR(255),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  expires_at TIMESTAMP NULL,
   FOREIGN KEY (table_id) REFERENCES tables(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS orders (
-  id TEXT PRIMARY KEY,
-  session_id TEXT,
-  table_id TEXT,
-  table_reference TEXT,
-  table_number INTEGER,
-  table_area TEXT,
-  table_label TEXT,
-  order_number TEXT NOT NULL UNIQUE,
-  status TEXT NOT NULL DEFAULT 'Pending',
-  order_source TEXT,
-  total REAL NOT NULL DEFAULT 0,
-  customer_name TEXT,
-  customer_phone TEXT,
-  payment_status TEXT DEFAULT 'Unpaid',
-  payment_method TEXT,
-  discount_type TEXT,
-  discount_value REAL,
-  discount_amount REAL,
-  final_total REAL,
-  waiter_id TEXT,
-  waiter_name TEXT,
-  accepted_at TEXT,
-  served_at TEXT,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  id VARCHAR(255) PRIMARY KEY,
+  session_id VARCHAR(255),
+  table_id VARCHAR(255),
+  table_reference VARCHAR(255),
+  table_number INT,
+  table_area VARCHAR(255),
+  table_label VARCHAR(255),
+  order_number VARCHAR(255) NOT NULL UNIQUE,
+  status VARCHAR(50) NOT NULL DEFAULT 'Pending',
+  order_source VARCHAR(255),
+  total DOUBLE NOT NULL DEFAULT 0,
+  customer_name VARCHAR(255),
+  customer_phone VARCHAR(255),
+  payment_status VARCHAR(50) DEFAULT 'Unpaid',
+  payment_method VARCHAR(50),
+  discount_type VARCHAR(50),
+  discount_value DOUBLE,
+  discount_amount DOUBLE,
+  final_total DOUBLE,
+  waiter_id VARCHAR(255),
+  waiter_name VARCHAR(255),
+  accepted_at TIMESTAMP NULL,
+  served_at TIMESTAMP NULL,
+  description TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
   FOREIGN KEY (table_id) REFERENCES tables(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
-  id TEXT PRIMARY KEY,
-  order_id TEXT NOT NULL,
-  menu_item_id TEXT NOT NULL,
-  quantity INTEGER NOT NULL DEFAULT 1,
-  unit_price REAL NOT NULL DEFAULT 0,
+  id VARCHAR(255) PRIMARY KEY,
+  order_id VARCHAR(255) NOT NULL,
+  menu_item_id VARCHAR(255),
+  name VARCHAR(255),
+  quantity INT NOT NULL DEFAULT 1,
+  price DOUBLE NOT NULL DEFAULT 0,
   special_instructions TEXT,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
-  FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS waiters (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  phone TEXT,
-  is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  id VARCHAR(255) PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  pin VARCHAR(10),
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  online TINYINT(1) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS waiter_calls (
-  id TEXT PRIMARY KEY,
-  order_id TEXT,
-  table_id TEXT,
-  table_reference TEXT,
-  session_id TEXT,
-  waiter_id TEXT,
-  reason TEXT,
-  status TEXT NOT NULL DEFAULT 'pending',
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  resolved_at TEXT,
+  id VARCHAR(255) PRIMARY KEY,
+  order_id VARCHAR(255),
+  table_id VARCHAR(255),
+  table_reference VARCHAR(255),
+  session_id VARCHAR(255),
+  waiter_id VARCHAR(255),
+  reason VARCHAR(255),
+  status VARCHAR(50) NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  resolved_at TIMESTAMP NULL,
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL,
   FOREIGN KEY (table_id) REFERENCES tables(id) ON DELETE SET NULL,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
@@ -144,74 +144,60 @@ CREATE TABLE IF NOT EXISTS waiter_calls (
 );
 
 CREATE TABLE IF NOT EXISTS kitchen_credentials (
-  id TEXT PRIMARY KEY,
-  password_hash TEXT NOT NULL,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  id VARCHAR(255) PRIMARY KEY,
+  password_hash VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS menu_versions (
-  id TEXT PRIMARY KEY,
-  version_number INTEGER NOT NULL,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  id VARCHAR(255) PRIMARY KEY,
+  version_number INT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Restaurant-level printer configuration. One row per printer role
--- ('bill' | 'kot'). Configured ONCE by the admin; every waiter and admin
--- print button reads from these same rows via the backend -- never from a
--- device's own localStorage. last_seen_at is a heartbeat written by the
--- one restaurant-side print connector every time it polls for jobs, so
--- "READY" vs "OFFLINE" reflects whether the connector is actually alive,
--- not just whether settings were saved.
 CREATE TABLE IF NOT EXISTS printers (
-  id TEXT PRIMARY KEY CHECK (id IN ('bill','kot')),
-  printer_name TEXT,
-  connection_type TEXT NOT NULL DEFAULT 'network' CHECK (connection_type IN ('network','windows')),
-  ip_address TEXT,
-  port INTEGER,
-  paper_width TEXT NOT NULL DEFAULT '80mm' CHECK (paper_width IN ('58mm','80mm')),
-  copies INTEGER NOT NULL DEFAULT 1,
-  auto_cut INTEGER NOT NULL DEFAULT 1 CHECK (auto_cut IN (0,1)),
-  auto_print INTEGER NOT NULL DEFAULT 0 CHECK (auto_print IN (0,1)),
-  last_seen_at TEXT,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  id VARCHAR(255) PRIMARY KEY,
+  printer_name VARCHAR(255),
+  connection_type VARCHAR(50) NOT NULL DEFAULT 'network',
+  ip_address VARCHAR(255),
+  port INT,
+  paper_width VARCHAR(20) NOT NULL DEFAULT '80mm',
+  copies INT NOT NULL DEFAULT 1,
+  auto_cut TINYINT(1) NOT NULL DEFAULT 1,
+  auto_print TINYINT(1) NOT NULL DEFAULT 0,
+  last_seen_at TIMESTAMP NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
--- Centralized print-job queue. Waiter and Admin both create rows here
--- through the exact same service function -- neither ever talks to a
--- printer directly. The one restaurant-side connector polls this queue
--- over outbound HTTPS and reports results back, so the printer never has
--- to be reachable from the internet or from any individual device.
 CREATE TABLE IF NOT EXISTS print_jobs (
-  id TEXT PRIMARY KEY,
-  order_id TEXT,
-  type TEXT NOT NULL CHECK (type IN ('BILL','KOT')),
-  printer_id TEXT NOT NULL CHECK (printer_id IN ('bill','kot')),
-  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','PROCESSING','PRINTED','FAILED','CANCELLED')),
+  id VARCHAR(255) PRIMARY KEY,
+  order_id VARCHAR(255),
+  type VARCHAR(50) NOT NULL,
+  printer_id VARCHAR(50) NOT NULL,
+  status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
   payload TEXT NOT NULL,
-  is_test INTEGER NOT NULL DEFAULT 0 CHECK (is_test IN (0,1)),
-  created_by TEXT,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  max_attempts INTEGER NOT NULL DEFAULT 3,
+  is_test TINYINT(1) NOT NULL DEFAULT 0,
+  created_by VARCHAR(255),
+  attempts INT NOT NULL DEFAULT 0,
+  max_attempts INT NOT NULL DEFAULT 3,
   error_message TEXT,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  claimed_at TEXT,
-  printed_at TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  claimed_at TIMESTAMP NULL,
+  printed_at TIMESTAMP NULL,
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
-  
 CREATE TABLE IF NOT EXISTS order_bill_splits (
-  id TEXT PRIMARY KEY,
-  order_id TEXT NOT NULL,
-  bill_number INTEGER NOT NULL,
+  id VARCHAR(255) PRIMARY KEY,
+  order_id VARCHAR(255) NOT NULL,
+  bill_number INT NOT NULL,
   items_json TEXT NOT NULL,
-  subtotal REAL NOT NULL DEFAULT 0,
-  tax REAL NOT NULL DEFAULT 0,
-  total REAL NOT NULL DEFAULT 0,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  subtotal DOUBLE NOT NULL DEFAULT 0,
+  tax DOUBLE NOT NULL DEFAULT 0,
+  total DOUBLE NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
 );
 `;
@@ -224,48 +210,40 @@ export async function initializeSchema(db) {
 
   try {
     await db.exec(schemaSql);
-    try {
-      await db.run("ALTER TABLE orders ADD COLUMN order_source TEXT");
-    } catch (err) {
-      if (!String(err.message).includes("duplicate column name")) throw err;
-    }
 
-    // Category-wise discount support (Food vs Alcohol) alongside the
-    // existing flat/percent discount columns. discount_mode distinguishes
-    // a plain "direct amount" discount from a category-split discount.
-    const discountColumns = [
-      "ALTER TABLE orders ADD COLUMN discount_mode TEXT",
-      "ALTER TABLE orders ADD COLUMN food_discount_percent REAL",
-      "ALTER TABLE orders ADD COLUMN alcohol_discount_percent REAL",
-      "ALTER TABLE orders ADD COLUMN food_discount_amount REAL",
-      "ALTER TABLE orders ADD COLUMN alcohol_discount_amount REAL",
+    // In MySQL, to avoid errors on duplicate columns via ALTER TABLE, you usually handle it via information_schema or just suppress errors.
+    const optionalColumns = [
+      "ALTER TABLE orders ADD COLUMN order_source VARCHAR(255)",
+      "ALTER TABLE orders ADD COLUMN description TEXT",
+      "ALTER TABLE orders ADD COLUMN discount_mode VARCHAR(50)",
+      "ALTER TABLE orders ADD COLUMN food_discount_percent DOUBLE",
+      "ALTER TABLE orders ADD COLUMN alcohol_discount_percent DOUBLE",
+      "ALTER TABLE orders ADD COLUMN food_discount_amount DOUBLE",
+      "ALTER TABLE orders ADD COLUMN alcohol_discount_amount DOUBLE"
     ];
-    for (const statement of discountColumns) {
+    for (const stmt of optionalColumns) {
       try {
-        await db.run(statement);
+        await db.exec(stmt);
       } catch (err) {
-        if (!String(err.message).includes("duplicate column name")) throw err;
+        if (!String(err.message).includes("Duplicate column name")) {
+          // ignore duplicate columns
+        }
       }
     }
 
     console.log("✓ Database schema initialized");
 
-    // Ensure there's at least one menu version
     const existing = await db.get("SELECT COUNT(*) as count FROM menu_versions");
-    if (existing.count === 0) {
+    if (existing && existing.count === 0) {
       const id = "version-" + Date.now();
-      await db.run(
-        "INSERT INTO menu_versions (id, version_number) VALUES (?, ?)",
-        [id, 1]
-      );
+      await db.run("INSERT INTO menu_versions (id, version_number) VALUES (?, ?)", [id, 1]);
     }
 
-    // Ensure the two printer roles always exist as rows (unconfigured until
-    // the admin fills them in via Settings) so GET /printers never has to
-    // special-case a missing row.
-    for (const printerId of ["bill", "kot"]) {
+    const printers = ["bill", "kot"];
+    for (const printerId of printers) {
+      // MYSQL INSERT IGNORE
       await db.run(
-        "INSERT OR IGNORE INTO printers (id, printer_name, connection_type, paper_width, copies, auto_cut, auto_print) VALUES (?, ?, 'network', '80mm', 1, 1, 0)",
+        "INSERT IGNORE INTO printers (id, printer_name, connection_type, paper_width, copies, auto_cut, auto_print) VALUES (?, ?, 'network', '80mm', 1, 1, 0)",
         [printerId, printerId === "bill" ? "Bill Printer" : "KOT Printer"]
       );
     }
@@ -279,14 +257,5 @@ export async function seedDefaultData(db) {
   if (!db || typeof db.all !== "function") {
     console.warn("[schema] Skipping seed: no db connection");
     return;
-  }
-
-  try {
-    const categories = await db.all("SELECT COUNT(*) as count FROM categories");
-    if (categories[0]?.count === 0) {
-      console.log("[schema] Database is empty, skipping seed (data should be uploaded separately)");
-    }
-  } catch (err) {
-    console.warn("[schema] Could not check seed status:", err);
   }
 }

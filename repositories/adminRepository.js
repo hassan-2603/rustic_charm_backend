@@ -4,6 +4,10 @@ import { getSqliteDb } from "../config/database.js";
 const sqlite = {
   async all(sql, params = []) {
     const db = getSqliteDb();
+    const result = db.all(sql, params);
+    if (result && typeof result.then === "function") {
+      return result;
+    }
     return new Promise((resolve, reject) => {
       db.all(sql, params, (error, rows) => {
         if (error) {
@@ -17,6 +21,10 @@ const sqlite = {
 
   async run(sql, params = []) {
     const db = getSqliteDb();
+    const result = db.run(sql, params);
+    if (result && typeof result.then === "function") {
+      return result;
+    }
     return new Promise((resolve, reject) => {
       db.run(sql, params, function onRun(error) {
         if (error) {
@@ -264,10 +272,10 @@ export async function updateTableInDb(id, updates) {
 }
 
 export async function incrementMenuVersionInDb() {
-  const current = await sqlite.all("SELECT value FROM restaurant_settings WHERE key = 'menu_version' LIMIT 1");
+  const current = await sqlite.all("SELECT value FROM restaurant_settings WHERE `key` = 'menu_version' LIMIT 1");
   const nextValue = current.length ? Number(current[0].value || 0) + 1 : 1;
   await sqlite.run(
-    "INSERT INTO restaurant_settings (id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    "INSERT INTO restaurant_settings (id, `key`, value, updated_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
     [`menu-version`, "menu_version", String(nextValue), new Date().toISOString()]
   );
   return nextValue;

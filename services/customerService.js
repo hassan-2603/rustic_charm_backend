@@ -138,7 +138,7 @@ async function getSessionInfo(db, sessionId, tableReference) {
 async function generateOrderNumber(db) {
   if (isSqliteDb(db)) {
     // Use MAX() to be race-safe when concurrent orders are placed simultaneously
-    const row = await db.get("SELECT MAX(CAST(REPLACE(order_number, 'RC-', '') AS INTEGER)) AS last_num FROM orders WHERE order_number LIKE 'RC-%'");
+    const row = await db.get("SELECT MAX(CAST(REPLACE(order_number, 'RC-', '') AS UNSIGNED)) AS last_num FROM orders WHERE order_number LIKE 'RC-%'");
     const lastNumber = row?.last_num ?? 0;
     return `RC-${String(lastNumber + 1).padStart(4, "0")}`;
   }
@@ -273,6 +273,7 @@ async function getOrdersBySession(db, sessionId) {
         servedAt: row.served_at,
         completedAt: row.completed_at,
         createdAt: row.created_at,
+        lastPrintedItems: row.last_printed_items ? (typeof row.last_printed_items === "string" ? JSON.parse(row.last_printed_items) : row.last_printed_items) : null,
         items: items.map((item) => ({
           id: item.id,
           menuItemId: item.menu_item_id,
@@ -333,6 +334,7 @@ async function getOrderById(db, orderId) {
       total: Number(row.total || 0),
       customerName: row.customer_name,
       customerPhone: row.customer_phone,
+      lastPrintedItems: row.last_printed_items ? (typeof row.last_printed_items === "string" ? JSON.parse(row.last_printed_items) : row.last_printed_items) : null,
       items: items.map((item) => ({
         id: item.id,
         menuItemId: item.menu_item_id,

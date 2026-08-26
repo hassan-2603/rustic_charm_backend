@@ -149,7 +149,7 @@ export async function addCategory(db, category) {
     const id = category.id || crypto.randomUUID();
     const data = {
       id,
-      name: category.name || "",
+      name: typeof category.name === "object" ? JSON.stringify(category.name) : (category.name || ""),
       is_active: category.isActive === false ? 0 : 1,
       display_order: Number(category.displayOrder ?? 0),
       created_at: new Date().toISOString(),
@@ -164,7 +164,7 @@ export async function addCategory(db, category) {
   }
 
   const data = {
-    name: category.name || "",
+    name: typeof category.name === "object" ? JSON.stringify(category.name) : (category.name || ""),
     isActive: category.isActive !== false,
     displayOrder: category.displayOrder ?? 0,
   };
@@ -177,7 +177,7 @@ export async function updateCategory(db, id, category) {
   if (!id) throw new Error("Category ID is required");
   if (isSqliteDb(db)) {
     const entries = Object.entries({
-      name: category.name,
+      name: category.name !== undefined ? (typeof category.name === "object" ? JSON.stringify(category.name) : category.name) : undefined,
       is_active: category.isActive === undefined ? undefined : category.isActive ? 1 : 0,
       display_order: category.displayOrder,
       updated_at: new Date().toISOString(),
@@ -576,17 +576,19 @@ export async function getOrders(db) {
         alcoholDiscountAmount: row.alcohol_discount_amount,
         waiterId: row.waiter_id,
         waiterName: row.waiter_name,
+        description: row.description,
         acceptedAt: row.accepted_at,
         servedAt: row.served_at,
         completedAt: row.completed_at,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+        lastPrintedItems: row.last_printed_items ? (typeof row.last_printed_items === "string" ? JSON.parse(row.last_printed_items) : row.last_printed_items) : null,
         items: items.map((item) => ({
           id: item.id,
           menuItemId: item.menu_item_id,
           name: item.name,
           category: item.category_name || "",
-        categoryId: item.category_id || "",
+          categoryId: item.category_id || "",
           categoryId: item.category_id || "",
           quantity: Number(item.quantity || 0),
           price: Number(item.price || 0),
@@ -613,8 +615,8 @@ export async function createAdminOrder(db, order) {
   const orderNumber = await generateOrderNumber(db);
   const now = new Date().toISOString();
   await db.run(
-    "INSERT INTO orders (id, table_id, table_reference, table_number, table_area, table_label, order_number, order_source, status, total, waiter_id, waiter_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [id, table.id, table.table_key, table.table_number, table.area, table.display_name, orderNumber, "admin", "Accepted", Number(order.total) || 0, waiter.id, waiter.name, now, now]
+    "INSERT INTO orders (id, table_id, table_reference, table_number, table_area, table_label, order_number, order_source, status, total, waiter_id, waiter_name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [id, table.id, table.table_key, table.table_number, table.area, table.display_name, orderNumber, "admin", "Accepted", Number(order.total) || 0, waiter.id, waiter.name, order.description || "", now, now]
   );
   for (const item of order.items) {
     await db.run(
@@ -813,6 +815,7 @@ export async function addOrderItems(db, id, itemsToAdd) {
     return {
       id,
       total: Number(updatedOrderRow.total || 0),
+      description: updatedOrderRow.description || "",
       finalTotal:
         updatedOrderRow.final_total !== null && updatedOrderRow.final_total !== undefined
           ? Number(updatedOrderRow.final_total)
@@ -823,7 +826,7 @@ export async function addOrderItems(db, id, itemsToAdd) {
         name: item.name,
         category: item.category_name || "",
         categoryId: item.category_id || "",
-          categoryId: item.category_id || "",
+        categoryId: item.category_id || "",
         quantity: Number(item.quantity || 0),
         price: Number(item.price || 0),
         specialInstructions: item.special_instructions || "",
@@ -928,6 +931,7 @@ export async function removeOrderItems(db, id, itemIds) {
     return {
       id,
       total: Number(updatedOrderRow.total || 0),
+      description: updatedOrderRow.description || "",
       finalTotal:
         updatedOrderRow.final_total !== null && updatedOrderRow.final_total !== undefined
           ? Number(updatedOrderRow.final_total)
@@ -938,7 +942,7 @@ export async function removeOrderItems(db, id, itemIds) {
         name: item.name,
         category: item.category_name || "",
         categoryId: item.category_id || "",
-          categoryId: item.category_id || "",
+        categoryId: item.category_id || "",
         quantity: Number(item.quantity || 0),
         price: Number(item.price || 0),
         specialInstructions: item.special_instructions || "",
@@ -990,6 +994,112 @@ export async function removeOrderItems(db, id, itemIds) {
   return { id, ...updates2 };
 }
 
+export async function updateOrderItemPrices(db, id, updates) {
+  if (!id) throw new Error("Order ID is required");
+  if (!Array.isArray(updates) || updates.length === 0) {
+    throw new Error("At least one update is required");
+  }
+
+  if (isSqliteDb(db)) {
+    const currentOrder = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
+    if (!currentOrder) throw new Error("Order not found");
+
+    const now = new Date().toISOString();
+
+    await db.run("BEGIN TRANSACTION");
+    try {
+      for (const update of updates) {
+        if (!update.id || update.newPrice === undefined) continue;
+        await db.run(
+          "UPDATE order_items SET price = ?, updated_at = ? WHERE id = ? AND order_id = ?",
+          [Number(update.newPrice), now, update.id, id]
+        );
+      }
+
+      const allItems = await db.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
+      const newTotal = allItems.reduce((sum, row) => sum + Number(row.price || 0) * Number(row.quantity || 0), 0);
+
+      const orderUpdates = { total: newTotal, updated_at: now };
+      if (currentOrder.discount_amount !== null && currentOrder.discount_amount !== undefined) {
+        orderUpdates.final_total = Math.max(0, newTotal - Number(currentOrder.discount_amount));
+      }
+
+      const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
+      const params = [...Object.values(orderUpdates), id];
+      await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+
+      await db.run("COMMIT");
+    } catch (error) {
+      await db.run("ROLLBACK");
+      throw error;
+    }
+
+    const items = await db.all(
+      `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
+       FROM order_items
+       LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+       LEFT JOIN categories ON menu_items.category_id = categories.id
+       WHERE order_items.order_id = ?
+       ORDER BY order_items.created_at ASC`,
+      [id]
+    );
+    const updatedOrderRow = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
+
+    return {
+      id,
+      total: Number(updatedOrderRow.total || 0),
+      description: updatedOrderRow.description || "",
+      finalTotal:
+        updatedOrderRow.final_total !== null && updatedOrderRow.final_total !== undefined
+          ? Number(updatedOrderRow.final_total)
+          : updatedOrderRow.final_total,
+      items: items.map((item) => ({
+        id: item.id,
+        menuItemId: item.menu_item_id,
+        name: item.name,
+        category: item.category_name || "",
+        categoryId: item.category_id || "",
+        quantity: Number(item.quantity || 0),
+        price: Number(item.price || 0),
+        specialInstructions: item.special_instructions || "",
+      })),
+    };
+  }
+
+  // Firestore
+  const docRef = ordersCollection(db).doc(id);
+  const snapshot = await docRef.get();
+  if (!snapshot.exists) throw new Error("Order not found");
+
+  const currentData = snapshot.data();
+  const currentItems = Array.isArray(currentData.items) ? currentData.items : [];
+
+  const updateMap = new Map();
+  for (const update of updates) {
+    if (update.id && update.newPrice !== undefined) {
+      updateMap.set(String(update.id), Number(update.newPrice));
+    }
+  }
+
+  const newItems = currentItems.map((item, index) => {
+    const itemKey = item.id !== undefined ? String(item.id) : String(index);
+    if (updateMap.has(itemKey)) {
+      return { ...item, price: updateMap.get(itemKey) };
+    }
+    return item;
+  });
+
+  const newTotal = newItems.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
+
+  const resultUpdates = { items: newItems, total: newTotal };
+  if (currentData.discountAmount !== null && currentData.discountAmount !== undefined) {
+    resultUpdates.finalTotal = Math.max(0, newTotal - Number(currentData.discountAmount));
+  }
+
+  await docRef.update(resultUpdates);
+  return { id, ...resultUpdates };
+}
+
 /**
  * Cancels (permanently deletes) a single order. Used by the red "Cancel"
  * button on the Admin "View Details" drawer and the Waiter "My Orders" card.
@@ -1037,7 +1147,7 @@ export async function deleteOrder(db, id) {
 export async function generateOrderNumber(db) {
   if (isSqliteDb(db)) {
     // Use MAX() to avoid race conditions when concurrent orders are placed
-    const row = await db.get("SELECT MAX(CAST(REPLACE(order_number, 'RC-', '') AS INTEGER)) AS last_num FROM orders WHERE order_number LIKE 'RC-%'");
+    const row = await db.get("SELECT MAX(CAST(REPLACE(order_number, 'RC-', '') AS UNSIGNED)) AS last_num FROM orders WHERE order_number LIKE 'RC-%'");
     const lastNumber = row?.last_num ?? 0;
     return `RC-${String(lastNumber + 1).padStart(4, "0")}`;
   }
@@ -1161,7 +1271,7 @@ export async function updateKitchenPassword(db, password) {
     throw new Error("SQLite-backed backend requires SQLite database access");
   }
   await db.run(
-    "INSERT INTO kitchen_credentials (id, password, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET password = excluded.password, updated_at = excluded.updated_at",
+    "INSERT INTO kitchen_credentials (id, password, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE password = VALUES(password), updated_at = VALUES(updated_at)",
     ["kitchen", password, new Date().toISOString()]
   );
   return { id: "kitchen", password };
@@ -1171,10 +1281,10 @@ export async function incrementMenuVersion(db) {
   if (!isSqliteDb(db)) {
     throw new Error("SQLite-backed backend requires SQLite database access");
   }
-  const existing = await db.get("SELECT value FROM restaurant_settings WHERE key = 'menu_version' LIMIT 1");
+  const existing = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'menu_version' LIMIT 1");
   const nextValue = existing && existing.value ? Number(existing.value) + 1 : 1;
   await db.run(
-    "INSERT INTO restaurant_settings (id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    "INSERT INTO restaurant_settings (id, `key`, value, updated_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
     [`menu-version-${Date.now()}`, "menu_version", String(nextValue), new Date().toISOString()]
   );
   return nextValue;
@@ -1184,7 +1294,7 @@ export async function getMenuVersion(db) {
   if (!isSqliteDb(db)) {
     throw new Error("SQLite-backed backend requires SQLite database access");
   }
-  const row = await db.get("SELECT value FROM restaurant_settings WHERE key = 'menu_version' LIMIT 1");
+  const row = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'menu_version' LIMIT 1");
   return row && row.value ? Number(row.value) : 1;
 }
 
@@ -1241,7 +1351,7 @@ export async function getOrderSplits(db, orderId) {
 
 export async function getKotSections(db) {
   if (!isSqliteDb(db)) return {};
-  const row = await db.get("SELECT value FROM restaurant_settings WHERE key = 'kot_sections'");
+  const row = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'kot_sections'");
   return row && row.value ? JSON.parse(row.value) : {};
 }
 
@@ -1250,7 +1360,7 @@ export async function setKotSections(db, config) {
   const json = JSON.stringify(config || {});
   const now = new Date().toISOString();
   await db.run(
-    "INSERT INTO restaurant_settings (id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    "INSERT INTO restaurant_settings (id, `key`, value, updated_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
     ["kot_sections", "kot_sections", json, now]
   );
   return config;
@@ -1258,7 +1368,7 @@ export async function setKotSections(db, config) {
 
 export async function getBillSections(db) {
   if (!isSqliteDb(db)) return {};
-  const row = await db.get("SELECT value FROM restaurant_settings WHERE key = 'bill_sections'");
+  const row = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections'");
   return row && row.value ? JSON.parse(row.value) : {};
 }
 
@@ -1267,7 +1377,7 @@ export async function setBillSections(db, config) {
   const json = JSON.stringify(config || {});
   const now = new Date().toISOString();
   await db.run(
-    "INSERT INTO restaurant_settings (id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    "INSERT INTO restaurant_settings (id, `key`, value, updated_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
     ["bill_sections", "bill_sections", json, now]
   );
   return config;
