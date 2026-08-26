@@ -794,6 +794,7 @@ export async function addOrderItems(db, id, itemsToAdd) {
       const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
       const params = [...Object.values(orderUpdates), id];
       await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+      await db.run(`DELETE FROM order_bill_splits WHERE order_id = ?`, [id]);
 
       await db.run("COMMIT");
     } catch (error) {
@@ -910,6 +911,7 @@ export async function removeOrderItems(db, id, itemIds) {
       const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
       const params = [...Object.values(orderUpdates), id];
       await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+      await db.run(`DELETE FROM order_bill_splits WHERE order_id = ?`, [id]);
 
       await db.run("COMMIT");
     } catch (error) {
@@ -1027,6 +1029,7 @@ export async function updateOrderItemPrices(db, id, updates) {
       const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
       const params = [...Object.values(orderUpdates), id];
       await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+      await db.run(`DELETE FROM order_bill_splits WHERE order_id = ?`, [id]);
 
       await db.run("COMMIT");
     } catch (error) {
