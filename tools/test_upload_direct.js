@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 
 async function run() {
     const token = 'rustic-charm-admin-token';
-    const url = `http://localhost:5000/api/admin/upload-image?adminToken=${token}`;
+    const url = `https://rustic-charm-backend.onrender.com/api/admin/upload-image?adminToken=${token}`;
 
     const form = new FormData();
     // Create a small mock text file, but name it .png so mimetype filter or content doesn't fail

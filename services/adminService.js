@@ -611,6 +611,15 @@ export async function createAdminOrder(db, order) {
   const table = await db.get("SELECT * FROM tables WHERE id = ?", [order.tableId]);
   const waiter = await db.get("SELECT * FROM waiters WHERE id = ?", [order.waiterId]);
   if (!table || !waiter || waiter.active === 0 || waiter.is_active === 0) throw new Error("Selected waiter or table was not found");
+
+  if (table.occupied && table.current_order_id) {
+    const existingOrder = await db.get("SELECT id, order_number FROM orders WHERE id = ?", [table.current_order_id]);
+    if (existingOrder) {
+      await addOrderItems(db, existingOrder.id, order.items);
+      return { id: existingOrder.id, orderNumber: existingOrder.order_number, appended: true };
+    }
+  }
+
   const id = crypto.randomUUID();
   const orderNumber = await generateOrderNumber(db);
   const now = new Date().toISOString();
@@ -768,19 +777,32 @@ export async function addOrderItems(db, id, itemsToAdd) {
     await db.run("BEGIN TRANSACTION");
     try {
       for (const item of itemsToAdd) {
-        await db.run(
-          "INSERT INTO order_items (id, order_id, menu_item_id, name, quantity, price, special_instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-          [
-            crypto.randomUUID(),
-            id,
-            item.menuItemId || null,
-            item.name || "",
-            Math.max(1, Number(item.quantity) || 1),
-            Number(item.price) || 0,
-            "",
-            now,
-          ]
-        );
+        const menuItemId = item.menuItemId || null;
+        const insertQty = Math.max(1, Number(item.quantity) || 1);
+        const insertPrice = Number(item.price) || 0;
+        let didUpdate = false;
+        if (menuItemId) {
+          const existing = await db.get("SELECT id, quantity FROM order_items WHERE order_id = ? AND menu_item_id = ? AND price = ?", [id, menuItemId, insertPrice]);
+          if (existing) {
+            await db.run("UPDATE order_items SET quantity = quantity + ? WHERE id = ?", [insertQty, existing.id]);
+            didUpdate = true;
+          }
+        }
+        if (!didUpdate) {
+          await db.run(
+            "INSERT INTO order_items (id, order_id, menu_item_id, name, quantity, price, special_instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+              crypto.randomUUID(),
+              id,
+              menuItemId,
+              item.name || "",
+              insertQty,
+              insertPrice,
+              "",
+              now,
+            ]
+          );
+        }
       }
 
       const allItems = await db.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
