@@ -615,7 +615,7 @@ export async function createAdminOrder(db, order) {
   if (table.occupied && table.current_order_id) {
     const existingOrder = await db.get("SELECT id, order_number FROM orders WHERE id = ?", [table.current_order_id]);
     if (existingOrder) {
-      await addOrderItems(db, existingOrder.id, order.items);
+      await addOrderItems(db, existingOrder.id, order.items, order.description);
       return { id: existingOrder.id, orderNumber: existingOrder.order_number, appended: true };
     }
   }
@@ -762,7 +762,7 @@ export async function updateOrder(db, id, updates) {
  * If the order already has a discount amount applied, finalTotal is kept in
  * sync (same discountAmount, recomputed against the new total).
  */
-export async function addOrderItems(db, id, itemsToAdd) {
+export async function addOrderItems(db, id, itemsToAdd, description) {
   if (!id) throw new Error("Order ID is required");
   if (!Array.isArray(itemsToAdd) || itemsToAdd.length === 0) {
     throw new Error("At least one item is required");
@@ -809,6 +809,9 @@ export async function addOrderItems(db, id, itemsToAdd) {
       const newTotal = allItems.reduce((sum, row) => sum + Number(row.price || 0) * Number(row.quantity || 0), 0);
 
       const orderUpdates = { total: newTotal, updated_at: now };
+      if (description !== undefined && description !== null && String(description).trim() !== "") {
+        orderUpdates.description = String(description).trim();
+      }
       if (currentOrder.discount_amount) {
         orderUpdates.final_total = Math.max(0, newTotal - Number(currentOrder.discount_amount));
       }

@@ -107,14 +107,14 @@ router.put("/orders/:id", async (req, res, next) => {
 router.post("/orders/:id/items", async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { items } = req.body || {};
+    const { items, description } = req.body || {};
     if (!id) {
       return res.status(400).json({ ok: false, error: "Order ID is required" });
     }
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ ok: false, error: "At least one item is required" });
     }
-    const updatedOrder = await addOrderItems(req.app.locals.db, id, items);
+    const updatedOrder = await addOrderItems(req.app.locals.db, id, items, description);
     res.json(buildApiResponse(updatedOrder));
   } catch (err) {
     next(buildApiError(err.message, 500));
