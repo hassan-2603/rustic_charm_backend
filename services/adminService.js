@@ -213,7 +213,7 @@ export async function deleteCategory(db, id) {
   return { id };
 }
 
-export async function getMenuItems(db) {
+export async function getMenuItems(db, lang) {
   if (isSqliteDb(db)) {
     const rows = await db.all(
       `SELECT menu_items.*, categories.name AS cat_join_name
@@ -222,44 +222,89 @@ export async function getMenuItems(db) {
        ORDER BY menu_items.created_at DESC`
     );
 
-    // Fetch all translations for all menu items
-    const translationsRows = await db.all(
-      `SELECT menu_item_id, language_code, name, description FROM menu_translations`
-    );
+    const langMap = {
+      english: "en",
+      russian: "ru",
+      german: "de",
+      spanish: "es",
+      kazakh: "kk",
+      hebrew: "he",
+      japanese: "ja",
+      korean: "ko",
+      en: "en",
+      ru: "ru",
+      de: "de",
+      es: "es",
+      kk: "kk",
+      he: "he",
+      ja: "ja",
+      ko: "ko",
+    };
+    const targetLang = lang ? langMap[String(lang).toLowerCase().trim()] || String(lang).toLowerCase().trim() : null;
 
-    // Build a map of translations: menu_item_id -> { language_code -> { name, description } }
-    const translationsMap = {};
-    for (const trans of translationsRows) {
-      if (!translationsMap[trans.menu_item_id]) {
-        translationsMap[trans.menu_item_id] = {};
+    let translationsMap = {};
+    if (targetLang && targetLang !== "en") {
+      // Query ONLY the requested language's translations
+      const translationsRows = await db.all(
+        `SELECT menu_item_id, language_code, name, description FROM menu_translations WHERE language_code = ?`,
+        [targetLang]
+      );
+      for (const trans of translationsRows) {
+        if (!translationsMap[trans.menu_item_id]) {
+          translationsMap[trans.menu_item_id] = {};
+        }
+        translationsMap[trans.menu_item_id][trans.language_code] = {
+          name: trans.name,
+          description: trans.description,
+        };
       }
-      translationsMap[trans.menu_item_id][trans.language_code] = {
-        name: trans.name,
-        description: trans.description,
-      };
+    } else if (!targetLang) {
+      // No language specified: backward compatible full translations for Admin
+      const translationsRows = await db.all(
+        `SELECT menu_item_id, language_code, name, description FROM menu_translations`
+      );
+      for (const trans of translationsRows) {
+        if (!translationsMap[trans.menu_item_id]) {
+          translationsMap[trans.menu_item_id] = {};
+        }
+        translationsMap[trans.menu_item_id][trans.language_code] = {
+          name: trans.name,
+          description: trans.description,
+        };
+      }
     }
+    // If targetLang === 'en', translationsMap stays {} because English is stored directly in menu_items
 
-    return rows.map((row) => ({
-      id: row.id,
-      categoryId: row.category_id,
-      // Use the JOIN name first, then the stored fallback name, then the id, then empty
-      category: row.cat_join_name || row.category_name || row.category_id || "",
-      name: parseJsonField(row.name),
-      description: parseJsonField(row.description) || "",
-      price: Number(row.price || 0),
-      imageUrl: row.image_url || "",
-      image: row.image_url || "",
-      isVeg: toBoolean(row.is_veg),
-      isAvailable: toBoolean(row.is_available),
-      isPopular: toBoolean(row.is_popular),
-      prepTime: row.prep_time,
-      rating: Number(row.rating || 0),
-      metadata: row.metadata ? parseJsonField(row.metadata) : {},
-      priceOptions: row.metadata ? parseJsonField(row.metadata).priceOptions : undefined,
-      translations: translationsMap[row.id] || {},
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+    return rows.map((row) => {
+      const transObj = translationsMap[row.id] || {};
+      const localized = targetLang && targetLang !== "en" ? transObj[targetLang] : null;
+
+      const rawName = parseJsonField(row.name);
+      const rawDesc = parseJsonField(row.description) || "";
+      const itemName = localized?.name || (typeof rawName === "object" && rawName !== null ? (rawName[targetLang || "en"] || rawName.en || rawName.English || Object.values(rawName)[0]) : rawName);
+      const itemDesc = localized?.description || (typeof rawDesc === "object" && rawDesc !== null ? (rawDesc[targetLang || "en"] || rawDesc.en || rawDesc.English || Object.values(rawDesc)[0] || "") : rawDesc);
+
+      return {
+        id: row.id,
+        categoryId: row.category_id,
+        category: row.cat_join_name || row.category_name || row.category_id || "",
+        name: itemName,
+        description: itemDesc,
+        price: Number(row.price || 0),
+        imageUrl: row.image_url || "",
+        image: row.image_url || "",
+        isVeg: toBoolean(row.is_veg),
+        isAvailable: toBoolean(row.is_available),
+        isPopular: toBoolean(row.is_popular),
+        prepTime: row.prep_time,
+        rating: Number(row.rating || 0),
+        metadata: row.metadata ? parseJsonField(row.metadata) : {},
+        priceOptions: row.metadata ? parseJsonField(row.metadata).priceOptions : undefined,
+        translations: transObj,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      };
+    });
   }
   const snapshot = await menuCollection(db).get();
   return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
@@ -519,6 +564,23 @@ export async function updateTable(db, id, updates) {
     const params = entries.map(([, value]) => value);
     params.push(id);
     await db.run(`UPDATE tables SET ${clauses} WHERE id = ?`, params);
+
+    // When a table is freed, end its active session and ensure active order is saved as Completed for all Excel reports
+    if (updates.status === 'available' || updates.occupied === false || updates.occupied === 0) {
+      const now = new Date().toISOString();
+      await db.run("UPDATE sessions SET status = 'completed', updated_at = ? WHERE table_id = ? AND status = 'active'", [now, id]);
+      await db.run(
+        `UPDATE orders 
+         SET status = 'Completed', 
+             payment_status = 'Paid',
+             payment_method = CASE WHEN payment_method IS NOT NULL AND payment_method != '' THEN payment_method ELSE 'Cash' END,
+             completed_at = COALESCE(completed_at, ?), 
+             updated_at = ? 
+         WHERE table_id = ? AND status NOT IN ('Completed', 'Cancelled', 'Rejected')`,
+        [now, now, id]
+      );
+    }
+
     return { id, ...updates };
   }
   await tablesCollection(db).doc(id).update(updates);
@@ -613,7 +675,10 @@ export async function createAdminOrder(db, order) {
   if (!table || !waiter || waiter.active === 0 || waiter.is_active === 0) throw new Error("Selected waiter or table was not found");
 
   if (table.occupied && table.current_order_id) {
-    const existingOrder = await db.get("SELECT id, order_number FROM orders WHERE id = ?", [table.current_order_id]);
+    const existingOrder = await db.get(
+      "SELECT id, order_number FROM orders WHERE id = ? AND status NOT IN ('Completed', 'Cancelled')",
+      [table.current_order_id]
+    );
     if (existingOrder) {
       await addOrderItems(db, existingOrder.id, order.items, order.description);
       return { id: existingOrder.id, orderNumber: existingOrder.order_number, appended: true };
@@ -739,6 +804,23 @@ export async function updateOrder(db, id, updates) {
           await db.run(
             "UPDATE orders SET table_id = ?, table_reference = ?, table_number = ?, table_area = ?, table_label = ?, updated_at = ? WHERE session_id = ?",
             [table.id, table.table_key, table.table_number, table.area, table.display_name, now, currentOrder.session_id]
+          );
+        }
+      }
+
+      if (updates.status === 'Completed') {
+        const targetTableId = updates.tableId || currentOrder.table_id;
+        if (targetTableId) {
+          await db.run(
+            "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ?",
+            [now, targetTableId]
+          );
+        }
+        const targetSessionId = updates.sessionId || currentOrder.session_id;
+        if (targetSessionId) {
+          await db.run(
+            "UPDATE sessions SET status = 'completed', updated_at = ? WHERE id = ?",
+            [now, targetSessionId]
           );
         }
       }

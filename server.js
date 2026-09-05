@@ -13,7 +13,7 @@ import customerRouter from "./routes/customer.js";
 import adminRouter from "./routes/admin.js";
 import staffRouter from "./routes/staff.js";
 import connectorRouter from "./routes/connector.js";
-import { getCategories, getMenuItems, addMenuItem, deleteMenuItem, getOrders } from "./services/adminService.js";
+import { getCategories, getMenuItems, addMenuItem, deleteMenuItem, getOrders, getMenuVersion } from "./services/adminService.js";
 import { createOrder } from "./services/customerService.js";
 import { getOffers as getAdminOffers, addOffer as addAdminOffer, updateOffer as updateAdminOffer, deleteOffer as deleteAdminOffer } from "./services/offerService.js";
 
@@ -193,10 +193,20 @@ app.use("/api/connector", connectorRouter);
 // API ROUTES
 // ==========================================
 
+// Menu Version Endpoint (lightweight check for cached menu validity)
+app.get("/api/menu/version", async (req, res) => {
+  try {
+    const version = await getMenuVersion(sqliteDb);
+    res.json({ version });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Menu Endpoints
 app.get("/api/menu", async (req, res) => {
   try {
-    const items = await getMenuItems(sqliteDb);
+    const items = await getMenuItems(sqliteDb, req.query.lang);
     res.json(items);
   } catch (err) {
     res.status(500).json({ error: err.message });

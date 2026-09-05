@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { addOrderItems } from "./adminService.js";
 
 function isSqliteDb(db) {
   return !!db && typeof db.all === "function" && typeof db.run === "function" && !db.collection;
@@ -34,13 +35,35 @@ function getAreaLabel(area) {
   return match?.label || area || "Unassigned Area";
 }
 
+function decodeTableToken(token) {
+  if (!token) return null;
+  const str = String(token).trim();
+  if (!str.startsWith("rc_")) return null;
+  const hex = str.slice(3);
+  if (hex.length % 2 !== 0) return null;
+  try {
+    let result = "";
+    for (let i = 0; i < hex.length; i += 2) {
+      const code = parseInt(hex.substring(i, i + 2), 16) ^ (0x4b + ((i / 2) % 7));
+      result += String.fromCharCode(code);
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
 function resolveTableFromReference(tables, reference) {
   if (!reference) return null;
-  const normalizedReference = normalizeTableReference(reference);
-  if (!normalizedReference) return null;
+  const rawStr = String(reference).trim();
+  const decoded = decodeTableToken(rawStr);
+  const targets = [
+    normalizeTableReference(rawStr),
+    decoded ? normalizeTableReference(decoded) : null
+  ].filter(Boolean);
 
-  return (
-    tables.find((table) => {
+  for (const target of targets) {
+    const found = tables.find((table) => {
       const tableKey = normalizeTableReference(table.tableKey || table.id || buildTableKey(table.area || table.areaLabel || "", table.tableNumber));
       const displayName = normalizeTableReference(table.displayName || `${table.areaLabel || getAreaLabel(table.area)} - Table ${table.tableNumber}`);
       const areaKey = normalizeTableReference(table.area);
@@ -48,17 +71,22 @@ function resolveTableFromReference(tables, reference) {
       const tableNumber = normalizeTableReference(table.tableNumber);
       const areaTableRef = normalizeTableReference(`${table.area || table.areaLabel || ""}-${table.tableNumber || ""}`);
       const labelledRef = normalizeTableReference(`${table.areaLabel || areaKey || ""}-${tableNumber}`);
+      const tableId = normalizeTableReference(table.id);
 
       return (
-        tableKey === normalizedReference ||
-        displayName === normalizedReference ||
-        areaKey === normalizedReference ||
-        areaTableRef === normalizedReference ||
-        labelledRef === normalizedReference ||
-        normalizeTableReference(`${table.area || ""}-${table.tableNumber || ""}`) === normalizedReference
+        tableKey === target ||
+        tableId === target ||
+        displayName === target ||
+        areaKey === target ||
+        areaTableRef === target ||
+        labelledRef === target ||
+        normalizeTableReference(`${table.area || ""}-${table.tableNumber || ""}`) === target
       );
-    }) || null
-  );
+    });
+    if (found) return found;
+  }
+
+  return null;
 }
 
 function enrichTable(tableDoc) {
@@ -162,13 +190,59 @@ async function generateOrderNumber(db) {
 
 function sanitizeOrderItems(items) {
   if (!Array.isArray(items)) return [];
-  return items.map((item) => ({
-    menuItemId: item.menuItem?.id || "",
-    name: typeof item.menuItem?.name === "object" ? item.menuItem?.name.English || Object.values(item.menuItem?.name)[0] || "" : item.menuItem?.name || "",
-    quantity: Number(item.quantity) || 1,
-    price: Number(item.selectedPriceOption?.amount ?? item.menuItem?.price ?? 0),
-    specialInstructions: item.specialInstructions || "",
-  }));
+  return items.map((item) => {
+    let name =
+      typeof item.menuItem?.name === "object"
+        ? item.menuItem?.name.English || Object.values(item.menuItem?.name)[0] || ""
+        : item.menuItem?.name || "";
+
+    if (item.selectedPriceOption && item.menuItem) {
+      const rawOptions =
+        Array.isArray(item.menuItem.priceOptions) && item.menuItem.priceOptions.length > 0
+          ? item.menuItem.priceOptions
+          : Array.isArray(item.menuItem.metadata?.priceOptions) &&
+            item.menuItem.metadata.priceOptions.length > 0
+          ? item.menuItem.metadata.priceOptions
+          : null;
+
+      if (rawOptions && rawOptions.length > 1) {
+        const opt = item.selectedPriceOption;
+        let optLabel = "";
+        if (opt.unit && String(opt.unit).trim()) {
+          const u = String(opt.unit).trim();
+          if (
+            isNaN(Number(u)) &&
+            (u.toLowerCase().includes("half") ||
+              u.toLowerCase().includes("full") ||
+              u.toLowerCase().includes("small") ||
+              u.toLowerCase().includes("large") ||
+              u.toLowerCase().includes("medium") ||
+              u.toLowerCase().includes("glass") ||
+              u.toLowerCase().includes("bottle") ||
+              u.toLowerCase().includes("portion") ||
+              u.toLowerCase().includes("plate"))
+          ) {
+            optLabel = u;
+          } else {
+            optLabel = `${opt.quantity} ${u}`;
+          }
+        } else {
+          optLabel = `${opt.quantity} ${opt.quantity === 1 ? "piece" : "pieces"}`;
+        }
+        if (optLabel && !name.includes(optLabel)) {
+          name = `${name} (${optLabel})`;
+        }
+      }
+    }
+
+    return {
+      menuItemId: item.menuItem?.id || "",
+      name,
+      quantity: Number(item.quantity) || 1,
+      price: Number(item.selectedPriceOption?.amount ?? item.menuItem?.price ?? 0),
+      specialInstructions: item.specialInstructions || "",
+    };
+  });
 }
 
 async function createOrder(db, tableReference, cart, total, sessionId, customerName, customerPhone) {
@@ -191,6 +265,61 @@ async function createOrder(db, tableReference, cart, total, sessionId, customerN
   const orderNumber = await generateOrderNumber(db);
 
   if (isSqliteDb(db)) {
+    // 1. Check if the table already has an active running order
+    const tableRow = await db.get("SELECT * FROM tables WHERE id = ?", [validTable.id]);
+    let existingOrder = null;
+
+    if (tableRow && tableRow.occupied && tableRow.current_order_id) {
+      existingOrder = await db.get(
+        "SELECT * FROM orders WHERE id = ? AND status NOT IN ('Completed', 'Cancelled')",
+        [tableRow.current_order_id]
+      );
+    }
+
+    if (!existingOrder && sessionId) {
+      existingOrder = await db.get(
+        "SELECT * FROM orders WHERE session_id = ? AND table_id = ? AND status NOT IN ('Completed', 'Cancelled') ORDER BY created_at DESC LIMIT 1",
+        [sessionId, validTable.id]
+      );
+    }
+
+    if (existingOrder) {
+      const items = sanitizeOrderItems(cart);
+      await addOrderItems(db, existingOrder.id, items, "");
+
+      if (sessionId) {
+        const sessionExists = await db.get("SELECT id FROM sessions WHERE id = ?", [sessionId]);
+        if (!sessionExists) {
+          await db.run(
+            "INSERT INTO sessions (id, table_id, table_reference, status, created_at) VALUES (?, ?, ?, 'active', ?)",
+            [sessionId, validTable.id, validTable.tableKey, new Date().toISOString()]
+          );
+        }
+        await db.run(
+          "UPDATE orders SET session_id = COALESCE(NULLIF(session_id, ''), ?) WHERE id = ?",
+          [sessionId, existingOrder.id]
+        );
+        await db.run(
+          "UPDATE tables SET current_session_id = ? WHERE id = ?",
+          [sessionId, validTable.id]
+        );
+      }
+
+      if (customerName || customerPhone) {
+        await db.run(
+          "UPDATE orders SET customer_name = COALESCE(NULLIF(customer_name, ''), ?), customer_phone = COALESCE(NULLIF(customer_phone, ''), ?) WHERE id = ?",
+          [String(customerName || "").trim(), String(customerPhone || "").trim(), existingOrder.id]
+        );
+      }
+
+      return {
+        id: existingOrder.id,
+        orderNumber: existingOrder.order_number,
+        tableReference: validTable.tableKey,
+        appended: true,
+      };
+    }
+
     const sessionExists = await db.get("SELECT id FROM sessions WHERE id = ?", [sessionId]);
     if (!sessionExists) {
       await db.run(

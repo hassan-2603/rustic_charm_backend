@@ -9,6 +9,7 @@ import {
   createWaiterCall,
   requestBill,
 } from "../services/customerService.js";
+import { createPrintJob } from "../services/printerService.js";
 
 const router = express.Router();
 
@@ -47,6 +48,17 @@ router.post("/orders", async (req, res, next) => {
       customerName,
       customerPhone
     );
+
+    try {
+      await createPrintJob(req.app.locals.db, {
+        orderId: result.id,
+        type: "KOT",
+        createdBy: "Customer",
+      });
+    } catch (printErr) {
+      console.warn("KOT auto-print on customer order skipped/failed:", printErr?.message || printErr);
+    }
+
     res.status(201).json(buildApiResponse(result));
   } catch (err) {
     next(buildApiError(err.message || "Unable to create order", err.status || 500));
