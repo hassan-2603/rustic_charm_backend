@@ -651,8 +651,15 @@ router.post("/printers/:type/test", async (req, res, next) => {
 
 router.post("/print-jobs", async (req, res, next) => {
   try {
-    const { orderId, type } = req.body || {};
-    const job = await createPrintJob(req.app.locals.db, { orderId, type, createdBy: "admin" });
+    const { orderId, type, action, items, description } = req.body || {};
+    const job = await createPrintJob(req.app.locals.db, {
+      orderId,
+      type,
+      createdBy: "admin",
+      action,
+      items,
+      description,
+    });
     res.status(201).json(buildApiResponse(job));
   } catch (err) {
     next(buildApiError(err.message, err.status || 500));

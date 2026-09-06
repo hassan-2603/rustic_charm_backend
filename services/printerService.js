@@ -173,9 +173,61 @@ async function getOrderForPrint(db, orderId) {
   };
 }
 
+function resolveSection(item, config = {}) {
+  const catId = item.categoryId || item.category_id || "";
+  const catName = String(item.category || item.category_name || "").trim().toLowerCase();
+
+  // 1. Direct configuration by category ID
+  if (catId && config[catId]) {
+    return config[catId];
+  }
+
+  // 2. Direct configuration by category Name
+  if (catName) {
+    for (const [key, section] of Object.entries(config)) {
+      if (key.toLowerCase() === catName) return section;
+    }
+  }
+
+  // 3. Keyword / domain heuristics
+  if (
+    isAlcoholCategoryName(catName) ||
+    catName.includes("beer") ||
+    catName.includes("wine") ||
+    catName.includes("whisky") ||
+    catName.includes("vodka") ||
+    catName.includes("cocktail") ||
+    catName.includes("mocktail") ||
+    catName.includes("beverage") ||
+    catName.includes("bar") ||
+    catName.includes("drink")
+  ) {
+    return "Bar & Beverages";
+  }
+
+  if (
+    catName.includes("tandoor") ||
+    catName.includes("roti") ||
+    catName.includes("naan") ||
+    catName.includes("bread") ||
+    catName.includes("paratha") ||
+    catName.includes("kulcha")
+  ) {
+    return "Indian Tandoor";
+  }
+
+  return "Food";
+}
+
 function buildBillPayload(order, billSectionsConfig) {
   const { foodItems, alcoholItems, foodTotal, alcoholTotal } = splitItemsByCategory(order.items, billSectionsConfig);
-  const toLine = (item) => ({ name: item.name, quantity: item.quantity, price: item.price, amount: item.price * item.quantity });
+  const toLine = (item) => ({
+    id: item.id,
+    name: item.name,
+    quantity: Number(item.quantity || 1),
+    price: Number(item.price || 0),
+    amount: Number(item.price || 0) * Number(item.quantity || 1),
+  });
   const isCategoryDiscount = order.discountMode === "category";
   return {
     orderNumber: order.orderNumber,
@@ -184,7 +236,7 @@ function buildBillPayload(order, billSectionsConfig) {
     customerPhone: order.customerPhone,
     waiterName: order.waiterName,
     date: new Date(order.createdAt || Date.now()).toLocaleString(),
-    items: order.items.map(toLine),
+    items: (order.items || []).map(toLine),
     foodItems: foodItems.map(toLine),
     alcoholItems: alcoholItems.map(toLine),
     foodTotal,
@@ -205,10 +257,10 @@ function buildKotPayload(order) {
     orderNumber: order.orderNumber,
     tableNumber: order.tableLabel,
     waiterName: order.waiterName,
-    date: new Date(order.createdAt || Date.now()).toLocaleString(),
-    items: order.items.map((item) => ({ name: item.name, quantity: item.quantity })),
-    addedItems: order.addedItems ? order.addedItems.map((item) => ({ name: item.name, quantity: item.quantity })) : [],
-    removedItems: order.removedItems ? order.removedItems.map((item) => ({ name: item.name, quantity: item.quantity })) : [],
+    date: new Date().toLocaleString(),
+    items: (order.items || []).map((item) => ({ name: item.name, quantity: Number(item.quantity || 1) })),
+    addedItems: order.addedItems ? order.addedItems.map((item) => ({ name: item.name, quantity: Number(item.quantity || 1) })) : [],
+    removedItems: order.removedItems ? order.removedItems.map((item) => ({ name: item.name, quantity: Number(item.quantity || 1) })) : [],
     description: order.description,
   };
 }
@@ -238,7 +290,7 @@ function rowToJob(row) {
  * ONE function both the waiter dashboard and the admin panel call --
  * neither has its own copy of this logic.
  */
-export async function createPrintJob(db, { orderId, type, createdBy, isTest = false }) {
+export async function createPrintJob(db, { orderId, type, createdBy, isTest = false, action = null, items = null, description = null }) {
   const normalizedType = String(type || "").toUpperCase();
   if (!["BILL", "KOT"].includes(normalizedType)) {
     throw Object.assign(new Error("Print type must be BILL or KOT"), { status: 400 });
@@ -321,20 +373,37 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
   let removedItemsOverall = [];
   let isDiffPrint = false;
 
-  if (order.lastPrintedItems) {
+  // 1. Explicit action passed from caller (e.g. AddItemModal or RemoveItemModal)
+  if (action === "ADD" && Array.isArray(items) && items.length > 0) {
+    isDiffPrint = true;
+    addedItemsOverall = items.map((i) => ({
+      ...i,
+      quantity: Number(i.quantity || 1),
+    }));
+  } else if (action === "REMOVE" && Array.isArray(items) && items.length > 0) {
+    isDiffPrint = true;
+    removedItemsOverall = items.map((i) => ({
+      ...i,
+      quantity: Number(i.quantity || 1),
+    }));
+  } else if (order.lastPrintedItems) {
+    // 2. Automatic diff against lastPrintedItems
     isDiffPrint = true;
     const currentItemMap = {};
     for (const item of order.items) {
-      currentItemMap[item.id] = item;
+      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}`;
+      currentItemMap[key] = item;
     }
     const lastItemMap = {};
     for (const item of order.lastPrintedItems) {
-      lastItemMap[item.id] = item;
+      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}`;
+      lastItemMap[key] = item;
     }
 
     // Check additions or quantity increases
     for (const item of order.items) {
-      const prev = lastItemMap[item.id];
+      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}`;
+      const prev = lastItemMap[key];
       if (!prev) {
         addedItemsOverall.push({ ...item });
       } else if (item.quantity > prev.quantity) {
@@ -344,7 +413,8 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
 
     // Check removals or quantity decreases
     for (const item of order.lastPrintedItems) {
-      const cur = currentItemMap[item.id];
+      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}`;
+      const cur = currentItemMap[key];
       if (!cur) {
         removedItemsOverall.push({ ...item });
       } else if (cur.quantity < item.quantity) {
@@ -357,12 +427,12 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
     }
   }
 
-  const sectionItems = {}; // e.g. { "Food": [...], "Bar": [...] }
+  const sectionItems = {}; // e.g. { "Food": [...], "Bar & Beverages": [...] }
   const sectionAddedItems = {};
   const sectionRemovedItems = {};
 
   const processItemIntoSection = (item, mapToUpdate) => {
-    const sectionName = config[item.categoryId] || "Unassigned";
+    const sectionName = resolveSection(item, config);
     if (!mapToUpdate[sectionName]) mapToUpdate[sectionName] = [];
     mapToUpdate[sectionName].push(item);
   };
@@ -391,6 +461,7 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
 
     const kotPayload = buildKotPayload({
       ...order,
+      description: description || order.description,
       items: sectionItemsList,
       addedItems: sectionAddedList,
       removedItems: sectionRemovedList
