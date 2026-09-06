@@ -599,7 +599,7 @@ export async function deleteTable(db, id) {
 
 export async function getOrders(db) {
   if (isSqliteDb(db)) {
-    const rows = await db.all("SELECT * FROM orders ORDER BY created_at DESC");
+    const rows = await db.all("SELECT * FROM orders WHERE status NOT IN ('Completed', 'Cancelled') ORDER BY created_at DESC");
     if (!rows || rows.length === 0) {
       return [];
     }
@@ -797,31 +797,30 @@ export async function updateOrder(db, id, updates) {
     const entries = Object.entries(orderUpdates).filter(([, value]) => value !== undefined);
     if (!entries.length) return { id, ...updates };
 
-    await db.run("BEGIN TRANSACTION");
-    try {
+    await db.transaction(async (tx) => {
       const clauses = entries.map(([key]) => `${key} = ?`).join(", ");
       const params = entries.map(([, value]) => value);
       params.push(id);
-      await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+      await tx.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
 
       if (table && table.id !== currentOrder.table_id) {
         const oldTableParams = [now, currentOrder.table_id, id];
         if (currentOrder.session_id) oldTableParams.push(currentOrder.session_id);
-        await db.run(
+        await tx.run(
           `UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ? AND (current_order_id = ?${currentOrder.session_id ? " OR current_session_id = ?" : ""})`,
           oldTableParams
         );
-        await db.run(
+        await tx.run(
           "UPDATE tables SET occupied = 1, status = 'occupied', current_order_id = ?, current_session_id = ?, updated_at = ? WHERE id = ?",
           [id, currentOrder.session_id || "", now, table.id]
         );
 
         if (currentOrder.session_id) {
-          await db.run(
+          await tx.run(
             "UPDATE sessions SET table_id = ?, table_reference = ?, updated_at = ? WHERE id = ?",
             [table.id, table.table_key, now, currentOrder.session_id]
           );
-          await db.run(
+          await tx.run(
             "UPDATE orders SET table_id = ?, table_reference = ?, table_number = ?, table_area = ?, table_label = ?, updated_at = ? WHERE session_id = ?",
             [table.id, table.table_key, table.table_number, table.area, table.display_name, now, currentOrder.session_id]
           );
@@ -831,25 +830,20 @@ export async function updateOrder(db, id, updates) {
       if (updates.status === 'Completed') {
         const targetTableId = updates.tableId || currentOrder.table_id;
         if (targetTableId) {
-          await db.run(
+          await tx.run(
             "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ?",
             [now, targetTableId]
           );
         }
         const targetSessionId = updates.sessionId || currentOrder.session_id;
         if (targetSessionId) {
-          await db.run(
+          await tx.run(
             "UPDATE sessions SET status = 'completed', updated_at = ? WHERE id = ?",
             [now, targetSessionId]
           );
         }
       }
-
-      await db.run("COMMIT");
-    } catch (error) {
-      await db.run("ROLLBACK");
-      throw error;
-    }
+    });
     return { id, ...updates, ...(table ? { tableId: table.id, tableReference: table.table_key, tableNumber: table.table_number, tableArea: table.area, tableLabel: table.display_name } : {}) };
   }
   await ordersCollection(db).doc(id).update(updates);
@@ -876,22 +870,21 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
 
     const now = new Date().toISOString();
 
-    await db.run("BEGIN TRANSACTION");
-    try {
+    await db.transaction(async (tx) => {
       for (const item of itemsToAdd) {
         const menuItemId = item.menuItemId || null;
         const insertQty = Math.max(1, Number(item.quantity) || 1);
         const insertPrice = Number(item.price) || 0;
         let didUpdate = false;
         if (menuItemId) {
-          const existing = await db.get("SELECT id, quantity FROM order_items WHERE order_id = ? AND menu_item_id = ? AND price = ?", [id, menuItemId, insertPrice]);
+          const existing = await tx.get("SELECT id, quantity FROM order_items WHERE order_id = ? AND menu_item_id = ? AND price = ?", [id, menuItemId, insertPrice]);
           if (existing) {
-            await db.run("UPDATE order_items SET quantity = quantity + ? WHERE id = ?", [insertQty, existing.id]);
+            await tx.run("UPDATE order_items SET quantity = quantity + ? WHERE id = ?", [insertQty, existing.id]);
             didUpdate = true;
           }
         }
         if (!didUpdate) {
-          await db.run(
+          await tx.run(
             "INSERT INTO order_items (id, order_id, menu_item_id, name, quantity, price, special_instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
               crypto.randomUUID(),
@@ -907,7 +900,7 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
         }
       }
 
-      const allItems = await db.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
+      const allItems = await tx.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
       const newTotal = allItems.reduce((sum, row) => sum + Number(row.price || 0) * Number(row.quantity || 0), 0);
 
       const orderUpdates = { total: newTotal, updated_at: now };
@@ -920,14 +913,9 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
 
       const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
       const params = [...Object.values(orderUpdates), id];
-      await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
-      await db.run(`DELETE FROM order_bill_splits WHERE order_id = ?`, [id]);
-
-      await db.run("COMMIT");
-    } catch (error) {
-      await db.run("ROLLBACK");
-      throw error;
-    }
+      await tx.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+      await tx.run(`DELETE FROM order_bill_splits WHERE order_id = ?`, [id]);
+    });
 
     const items = await db.all(
       `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
@@ -1005,25 +993,24 @@ export async function removeOrderItems(db, id, itemIds) {
 
     const now = new Date().toISOString();
 
-    await db.run("BEGIN TRANSACTION");
-    try {
+    await db.transaction(async (tx) => {
       for (const item of itemIds) {
         const itemId = typeof item === 'string' ? item : item.id;
         const qtyToRemove = typeof item === 'object' && item.quantity ? Number(item.quantity) : null;
 
         if (qtyToRemove && qtyToRemove > 0) {
-          const row = await db.get("SELECT quantity FROM order_items WHERE order_id = ? AND id = ?", [id, itemId]);
+          const row = await tx.get("SELECT quantity FROM order_items WHERE order_id = ? AND id = ?", [id, itemId]);
           if (row && row.quantity > qtyToRemove) {
-            await db.run("UPDATE order_items SET quantity = quantity - ? WHERE order_id = ? AND id = ?", [qtyToRemove, id, itemId]);
+            await tx.run("UPDATE order_items SET quantity = quantity - ? WHERE order_id = ? AND id = ?", [qtyToRemove, id, itemId]);
           } else {
-            await db.run("DELETE FROM order_items WHERE order_id = ? AND id = ?", [id, itemId]);
+            await tx.run("DELETE FROM order_items WHERE order_id = ? AND id = ?", [id, itemId]);
           }
         } else {
-          await db.run("DELETE FROM order_items WHERE order_id = ? AND id = ?", [id, itemId]);
+          await tx.run("DELETE FROM order_items WHERE order_id = ? AND id = ?", [id, itemId]);
         }
       }
 
-      const remaining = await db.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
+      const remaining = await tx.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
       if (remaining.length === 0) {
         throw new Error("Cannot remove every item from an order \u2014 cancel the order instead if it's no longer needed.");
       }
@@ -1037,14 +1024,9 @@ export async function removeOrderItems(db, id, itemIds) {
 
       const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
       const params = [...Object.values(orderUpdates), id];
-      await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
-      await db.run(`DELETE FROM order_bill_splits WHERE order_id = ?`, [id]);
-
-      await db.run("COMMIT");
-    } catch (error) {
-      await db.run("ROLLBACK");
-      throw error;
-    }
+      await tx.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+      await tx.run(`DELETE FROM order_bill_splits WHERE order_id = ?`, [id]);
+    });
 
     const items = await db.all(
       `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
@@ -1135,17 +1117,16 @@ export async function updateOrderItemPrices(db, id, updates) {
 
     const now = new Date().toISOString();
 
-    await db.run("BEGIN TRANSACTION");
-    try {
+    await db.transaction(async (tx) => {
       for (const update of updates) {
         if (!update.id || update.newPrice === undefined) continue;
-        await db.run(
+        await tx.run(
           "UPDATE order_items SET price = ?, updated_at = ? WHERE id = ? AND order_id = ?",
           [Number(update.newPrice), now, update.id, id]
         );
       }
 
-      const allItems = await db.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
+      const allItems = await tx.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
       const newTotal = allItems.reduce((sum, row) => sum + Number(row.price || 0) * Number(row.quantity || 0), 0);
 
       const orderUpdates = { total: newTotal, updated_at: now };
@@ -1155,14 +1136,9 @@ export async function updateOrderItemPrices(db, id, updates) {
 
       const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
       const params = [...Object.values(orderUpdates), id];
-      await db.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
-      await db.run(`DELETE FROM order_bill_splits WHERE order_id = ?`, [id]);
-
-      await db.run("COMMIT");
-    } catch (error) {
-      await db.run("ROLLBACK");
-      throw error;
-    }
+      await tx.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
+      await tx.run(`DELETE FROM order_bill_splits WHERE order_id = ?`, [id]);
+    });
 
     const items = await db.all(
       `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
@@ -1432,12 +1408,11 @@ export async function getMenuVersion(db) {
 export async function saveOrderSplits(db, orderId, splits) {
   if (!orderId) throw new Error("Order ID is required");
   if (isSqliteDb(db)) {
-    await db.run("BEGIN TRANSACTION");
-    try {
-      await db.run("DELETE FROM order_bill_splits WHERE order_id = ?", [orderId]);
+    await db.transaction(async (tx) => {
+      await tx.run("DELETE FROM order_bill_splits WHERE order_id = ?", [orderId]);
       const now = new Date().toISOString();
       for (const split of splits) {
-        await db.run(
+        await tx.run(
           "INSERT INTO order_bill_splits (id, order_id, bill_number, items_json, subtotal, tax, total, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
           [
             crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(),
@@ -1451,11 +1426,7 @@ export async function saveOrderSplits(db, orderId, splits) {
           ]
         );
       }
-      await db.run("COMMIT");
-    } catch (err) {
-      await db.run("ROLLBACK");
-      throw err;
-    }
+    });
     return { orderId, splits };
   } else {
     throw new Error("Splits only supported on SQLite");

@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 let connection;
 
 function createPromiseSqliteWrapper(db) {
-  return {
+  const wrapper = {
     all: (sql, params = []) => new Promise((resolve, reject) => {
       db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows));
     }),
@@ -26,8 +26,20 @@ function createPromiseSqliteWrapper(db) {
     exec: (sql) => new Promise((resolve, reject) => {
       db.exec(sql, (err) => err ? reject(err) : resolve());
     }),
-    close: (cb) => db.close(cb)
+    close: (cb) => db.close(cb),
+    transaction: async (callback) => {
+      await wrapper.run("BEGIN TRANSACTION");
+      try {
+        const result = await callback(wrapper);
+        await wrapper.run("COMMIT");
+        return result;
+      } catch (err) {
+        await wrapper.run("ROLLBACK").catch(() => {});
+        throw err;
+      }
+    }
   };
+  return wrapper;
 }
 
 export function openDatabase() {
@@ -87,7 +99,11 @@ export function openDatabase() {
         return rows[0] || null;
       },
       run: async (sql, params = []) => {
-        if (sql.trim().toUpperCase() === 'BEGIN TRANSACTION') sql = 'START TRANSACTION';
+        const upper = sql.trim().toUpperCase();
+        if (upper === 'BEGIN TRANSACTION' || upper === 'START TRANSACTION' || upper === 'COMMIT' || upper === 'ROLLBACK') {
+          console.warn(`[database] '${upper}' called directly via pool.query. Use db.transaction(async (tx) => { ... }) for safe connection-scoped transactions.`);
+          return { lastID: 0, changes: 0 };
+        }
         const [result] = await pool.query(sql, formatParams(params));
         return { lastID: result.insertId, changes: result.affectedRows };
       },
@@ -95,7 +111,43 @@ export function openDatabase() {
         const statements = sql.split(';').map(s => s.trim()).filter(s => s.length > 0);
         for (const stmt of statements) await pool.query(stmt);
       },
-      close: (cb) => pool.end().then(() => cb(null)).catch(err => cb(err))
+      close: (cb) => pool.end().then(() => cb(null)).catch(err => cb(err)),
+      transaction: async (callback) => {
+        const connection = await pool.getConnection();
+        await connection.beginTransaction();
+        try {
+          const tx = {
+            all: async (sql, params = []) => {
+              const [rows] = await connection.query(sql, formatParams(params));
+              return rows;
+            },
+            get: async (sql, params = []) => {
+              const [rows] = await connection.query(sql, formatParams(params));
+              return rows[0] || null;
+            },
+            run: async (sql, params = []) => {
+              const [result] = await connection.query(sql, formatParams(params));
+              return { lastID: result.insertId, changes: result.affectedRows };
+            },
+            exec: async (sql) => {
+              const statements = sql.split(';').map(s => s.trim()).filter(s => s.length > 0);
+              for (const stmt of statements) await connection.query(stmt);
+            },
+          };
+          const result = await callback(tx);
+          await connection.commit();
+          return result;
+        } catch (err) {
+          try {
+            await connection.rollback();
+          } catch (rollbackErr) {
+            console.error("[database] Transaction rollback failed:", rollbackErr);
+          }
+          throw err;
+        } finally {
+          connection.release();
+        }
+      }
     };
   }
 
