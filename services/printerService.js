@@ -35,11 +35,13 @@ function getCategoryText(rawCategory) {
   return String(value);
 }
 
-function isAlcoholCategory(rawCategory) {
+export function isAlcoholCategory(rawCategory) {
   const text = getCategoryText(rawCategory).toLowerCase();
   if (!text) return false;
   return ALCOHOL_KEYWORDS.some((keyword) => text.includes(keyword));
 }
+
+export const isAlcoholCategoryName = isAlcoholCategory;
 
 function splitItemsByCategory(items, billSectionsConfig) {
   const foodItems = [];
@@ -175,7 +177,7 @@ async function getOrderForPrint(db, orderId) {
 
 function resolveSection(item, config = {}) {
   const catId = item.categoryId || item.category_id || "";
-  const catName = String(item.category || item.category_name || "").trim().toLowerCase();
+  const catName = getCategoryText(item.category || item.category_name || "").trim().toLowerCase();
 
   // 1. Direct configuration by category ID
   if (catId && config[catId]) {
@@ -185,37 +187,11 @@ function resolveSection(item, config = {}) {
   // 2. Direct configuration by category Name
   if (catName) {
     for (const [key, section] of Object.entries(config)) {
-      if (key.toLowerCase() === catName) return section;
+      if (getCategoryText(key).trim().toLowerCase() === catName) return section;
     }
   }
 
-  // 3. Keyword / domain heuristics
-  if (
-    isAlcoholCategoryName(catName) ||
-    catName.includes("beer") ||
-    catName.includes("wine") ||
-    catName.includes("whisky") ||
-    catName.includes("vodka") ||
-    catName.includes("cocktail") ||
-    catName.includes("mocktail") ||
-    catName.includes("beverage") ||
-    catName.includes("bar") ||
-    catName.includes("drink")
-  ) {
-    return "Bar & Beverages";
-  }
-
-  if (
-    catName.includes("tandoor") ||
-    catName.includes("roti") ||
-    catName.includes("naan") ||
-    catName.includes("bread") ||
-    catName.includes("paratha") ||
-    catName.includes("kulcha")
-  ) {
-    return "Indian Tandoor";
-  }
-
+  // Default section when not explicitly assigned to any section
   return "Food";
 }
 
@@ -320,7 +296,7 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
   const order = await getOrderForPrint(db, orderId);
 
   if (normalizedType === "BILL") {
-    const configRow = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections'");
+    const configRow = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections' OR id = 'bill_sections'");
     const billSectionsConfig = configRow && configRow.value ? JSON.parse(configRow.value) : {};
 
     const splits = await db.all("SELECT * FROM order_bill_splits WHERE order_id = ? ORDER BY bill_number ASC", [orderId]);
@@ -366,7 +342,7 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
   }
 
   // KOT Splitting Logic
-  const row = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'kot_sections'");
+  const row = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'kot_sections' OR id = 'kot_sections'");
   const config = row && row.value ? JSON.parse(row.value) : {}; // map of categoryId -> section name
 
   let addedItemsOverall = [];
@@ -556,9 +532,9 @@ export async function reportPrintJobResult(db, jobId, { status, errorMessage }) 
   if (status === "PRINTED") {
     await db.run("UPDATE print_jobs SET status = 'PRINTED', error_message = NULL, printed_at = ?, updated_at = ? WHERE id = ?", [now, now, jobId]);
   } else {
-    // Failed: auto-retry a limited number of times, then leave it FAILED
-    // for the admin to retry manually. Never retries forever.
-    const willRetry = row.attempts < row.max_attempts;
+    // Failed: auto-retry real orders up to max_attempts, but fail test prints immediately
+    // so the admin UI receives the exact failure error right away without waiting.
+    const willRetry = !row.is_test && row.attempts < row.max_attempts;
     await db.run(
       `UPDATE print_jobs SET status = ?, error_message = ?, updated_at = ? WHERE id = ?`,
       [willRetry ? "PENDING" : "FAILED", errorMessage || "Print failed", now, jobId]
