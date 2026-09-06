@@ -231,6 +231,27 @@ export async function initializeSchema(db) {
       }
     }
 
+    // Ensure index on order_items(order_id) exists for fast bulk order loading
+    try {
+      let hasIndex = false;
+      try {
+        const existingIndexes = await db.all("SHOW INDEX FROM order_items WHERE Column_name = 'order_id'");
+        hasIndex = Boolean(existingIndexes && existingIndexes.length > 0);
+      } catch {
+        const sqliteIndexes = await db.all("PRAGMA index_list(order_items)").catch(() => []);
+        hasIndex = sqliteIndexes.some((idx) => idx.name === "idx_order_items_order_id");
+      }
+
+      if (!hasIndex) {
+        await db.exec("CREATE INDEX idx_order_items_order_id ON order_items(order_id)");
+        console.log("✓ Created index idx_order_items_order_id on order_items(order_id)");
+      }
+    } catch (indexErr) {
+      if (!String(indexErr.message).includes("Duplicate key name") && !String(indexErr.message).includes("already exists")) {
+        console.warn("[schema] Note on order_items index check/creation:", indexErr.message);
+      }
+    }
+
     console.log("✓ Database schema initialized");
 
     const existing = await db.get("SELECT COUNT(*) as count FROM menu_versions");

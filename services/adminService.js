@@ -600,17 +600,38 @@ export async function deleteTable(db, id) {
 export async function getOrders(db) {
   if (isSqliteDb(db)) {
     const rows = await db.all("SELECT * FROM orders ORDER BY created_at DESC");
+    if (!rows || rows.length === 0) {
+      return [];
+    }
+
+    const orderIds = rows.map((r) => r.id);
+    const placeholders = orderIds.map(() => "?").join(", ");
+    const itemsRows = await db.all(
+      `SELECT
+          oi.*,
+          c.name AS category_name,
+          c.id AS category_id
+       FROM order_items oi
+       LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+       LEFT JOIN categories c ON mi.category_id = c.id
+       WHERE oi.order_id IN (${placeholders})
+       ORDER BY oi.created_at ASC`,
+      orderIds
+    );
+
+    const itemsByOrderId = new Map();
+    for (const item of itemsRows) {
+      const list = itemsByOrderId.get(item.order_id);
+      if (list) {
+        list.push(item);
+      } else {
+        itemsByOrderId.set(item.order_id, [item]);
+      }
+    }
+
     const orders = [];
     for (const row of rows) {
-      const items = await db.all(
-        `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
-         FROM order_items
-         LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
-         LEFT JOIN categories ON menu_items.category_id = categories.id
-         WHERE order_items.order_id = ?
-         ORDER BY order_items.created_at ASC`,
-        [row.id]
-      );
+      const items = itemsByOrderId.get(row.id) || [];
       orders.push({
         id: row.id,
         sessionId: row.session_id,
@@ -650,7 +671,6 @@ export async function getOrders(db) {
           menuItemId: item.menu_item_id,
           name: item.name,
           category: item.category_name || "",
-          categoryId: item.category_id || "",
           categoryId: item.category_id || "",
           quantity: Number(item.quantity || 0),
           price: Number(item.price || 0),
