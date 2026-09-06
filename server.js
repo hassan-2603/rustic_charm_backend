@@ -32,16 +32,15 @@ const defaultCorsOrigins = [
   "http://localhost:5174",
   "https://poetic-fox-ac184c.netlify.app",
   "https://rusticcharmfrontend.netlify.app",
-  "https://idyllic-caramel-f532c6.netlify.app/",
+  "https://idyllic-caramel-f532c6.netlify.app",
   "https://rustic-charm.in",
   "https://www.rustic-charm.in"
-
 ];
 const configuredCorsOrigins = (process.env.CORS_ORIGINS || "")
   .split(",")
-  .map((origin) => origin.trim())
+  .map((origin) => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
-const corsOrigins = [...new Set([...defaultCorsOrigins, ...configuredCorsOrigins])];
+const corsOrigins = [...new Set([...defaultCorsOrigins.map((o) => o.replace(/\/$/, "")), ...configuredCorsOrigins])];
 
 const sqliteDb = openDatabase();
 app.locals.sqliteDb = sqliteDb;
@@ -102,7 +101,7 @@ async function ensureOffersDbReady() {
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || corsOrigins.includes(origin)) {
+    if (!origin || corsOrigins.includes(origin.replace(/\/$/, ""))) {
       return callback(null, true);
     }
 
@@ -117,12 +116,18 @@ app.use(express.json());
 
 // ==========================================
 // BASIC RATE LIMITING (in-memory, per IP)
+// Connector polling is authenticated and exempt from browser rate limits
 // ==========================================
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute window
 const RATE_LIMIT_MAX_REQUESTS = 120; // max requests per IP per window
 const rateLimitBuckets = new Map();
 
 app.use((req, res, next) => {
+  // Exempt connector service polling requests so restaurant Wi-Fi NAT does not throttle printers
+  if (req.path.startsWith("/api/connector")) {
+    return next();
+  }
+
   const key = req.ip || req.connection?.remoteAddress || "unknown";
   const now = Date.now();
   const bucket = rateLimitBuckets.get(key);
