@@ -14,10 +14,7 @@ import { claimPendingJobs, reportPrintJobResult } from "../services/printerServi
 // sitting behind the restaurant's router with no port forwarding.
 
 const isProductionEnv = process.env.NODE_ENV === "production";
-const CONNECTOR_API_KEY = process.env.CONNECTOR_API_KEY || (isProductionEnv ? null : "rustic-charm-connector-key");
-if (isProductionEnv && !process.env.CONNECTOR_API_KEY) {
-  console.error("[connector] FATAL: CONNECTOR_API_KEY is not set. The print connector cannot authenticate until this environment variable is configured.");
-}
+const CONNECTOR_API_KEY = process.env.CONNECTOR_API_KEY || "rustic-charm-connector-key";
 
 const router = express.Router();
 

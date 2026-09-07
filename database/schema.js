@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS orders (
   customer_phone VARCHAR(255),
   payment_status VARCHAR(50) DEFAULT 'Unpaid',
   payment_method VARCHAR(50),
+  payment_splits TEXT,
+  tip_amount DOUBLE DEFAULT 0,
   discount_type VARCHAR(50),
   discount_value DOUBLE,
   discount_amount DOUBLE,
@@ -219,7 +221,10 @@ export async function initializeSchema(db) {
       "ALTER TABLE orders ADD COLUMN food_discount_percent DOUBLE",
       "ALTER TABLE orders ADD COLUMN alcohol_discount_percent DOUBLE",
       "ALTER TABLE orders ADD COLUMN food_discount_amount DOUBLE",
-      "ALTER TABLE orders ADD COLUMN alcohol_discount_amount DOUBLE"
+      "ALTER TABLE orders ADD COLUMN alcohol_discount_amount DOUBLE",
+      "ALTER TABLE orders ADD COLUMN payment_splits TEXT",
+      "ALTER TABLE orders ADD COLUMN tip_amount DOUBLE DEFAULT 0",
+      "ALTER TABLE orders ADD COLUMN completed_at TIMESTAMP NULL"
     ];
     for (const stmt of optionalColumns) {
       try {

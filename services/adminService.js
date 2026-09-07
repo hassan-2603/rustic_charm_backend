@@ -597,9 +597,12 @@ export async function deleteTable(db, id) {
   return { id };
 }
 
-export async function getOrders(db) {
+export async function getOrders(db, { includeCompleted = false } = {}) {
   if (isSqliteDb(db)) {
-    const rows = await db.all("SELECT * FROM orders WHERE status NOT IN ('Completed', 'Cancelled') ORDER BY created_at DESC");
+    const whereClause = includeCompleted
+      ? "WHERE status != 'Cancelled'"
+      : "WHERE status NOT IN ('Completed', 'Cancelled')";
+    const rows = await db.all(`SELECT * FROM orders ${whereClause} ORDER BY created_at DESC`);
     if (!rows || rows.length === 0) {
       return [];
     }
@@ -648,6 +651,8 @@ export async function getOrders(db) {
         customerPhone: row.customer_phone,
         paymentStatus: row.payment_status,
         paymentMethod: row.payment_method,
+        paymentSplits: row.payment_splits ? (typeof row.payment_splits === "string" ? JSON.parse(row.payment_splits) : row.payment_splits) : null,
+        tipAmount: Number(row.tip_amount || 0),
         discountType: row.discount_type,
         discountValue: row.discount_value,
         discountAmount: row.discount_amount,
@@ -778,6 +783,8 @@ export async function updateOrder(db, id, updates) {
       customer_phone: updates.customerPhone,
       payment_status: updates.paymentStatus,
       payment_method: updates.paymentMethod,
+      payment_splits: updates.paymentSplits !== undefined ? (typeof updates.paymentSplits === "object" ? JSON.stringify(updates.paymentSplits) : updates.paymentSplits) : undefined,
+      tip_amount: updates.tipAmount !== undefined ? Number(updates.tipAmount) : undefined,
       discount_type: updates.discountType,
       discount_value: updates.discountValue,
       discount_amount: updates.discountAmount,
