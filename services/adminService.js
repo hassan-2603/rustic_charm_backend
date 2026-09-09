@@ -597,11 +597,16 @@ export async function deleteTable(db, id) {
   return { id };
 }
 
-export async function getOrders(db, { includeCompleted = false } = {}) {
+export async function getOrders(db, { includeCompleted = false, forReports = false } = {}) {
   if (isSqliteDb(db)) {
-    const whereClause = includeCompleted
-      ? "WHERE status != 'Cancelled'"
-      : "WHERE status NOT IN ('Completed', 'Cancelled')";
+    let whereClause = "";
+    if (forReports) {
+      whereClause = "WHERE status NOT IN ('Cancelled', 'Rejected')";
+    } else if (includeCompleted) {
+      whereClause = "WHERE status NOT IN ('Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL)";
+    } else {
+      whereClause = "WHERE status NOT IN ('Completed', 'Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL)";
+    }
     const rows = await db.all(`SELECT * FROM orders ${whereClause} ORDER BY created_at DESC`);
     if (!rows || rows.length === 0) {
       return [];
@@ -668,6 +673,7 @@ export async function getOrders(db, { includeCompleted = false } = {}) {
         acceptedAt: row.accepted_at,
         servedAt: row.served_at,
         completedAt: row.completed_at,
+        archived: Boolean(row.archived),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         lastPrintedItems: row.last_printed_items ? (typeof row.last_printed_items === "string" ? JSON.parse(row.last_printed_items) : row.last_printed_items) : null,
@@ -729,28 +735,37 @@ export async function createAdminOrder(db, order) {
 
 export async function deleteAllOrders(db) {
   if (isSqliteDb(db)) {
-    const result = await db.run("DELETE FROM orders");
-    await db.run("VACUUM");
+    // Soft-archive orders so they clear from the active screen but are NEVER lost from reports
+    const result = await db.run("UPDATE orders SET archived = 1");
+    await db.run(
+      "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ?",
+      [new Date().toISOString()]
+    );
     return { count: result.changes };
   }
   const snapshot = await ordersCollection(db).get();
-  const deletes = snapshot.docs.map((doc) => ordersCollection(db).doc(doc.id).delete());
-  await Promise.all(deletes);
-  return { count: deletes.length };
+  const updates = snapshot.docs.map((doc) => ordersCollection(db).doc(doc.id).update({ archived: 1 }));
+  await Promise.all(updates);
+  return { count: updates.length };
 }
 
 export async function deleteAllCompletedOrders(db) {
   if (isSqliteDb(db)) {
-    const result = await db.run("DELETE FROM orders WHERE status = 'Completed'");
-    await db.run("VACUUM");
+    // Soft-archive completed orders so they clear from the active screen but are NEVER lost from reports
+    const result = await db.run(
+      "UPDATE orders SET archived = 1 WHERE status IN ('Completed', 'Payment Done', 'Served') OR payment_status = 'Paid'"
+    );
     return { count: result.changes };
   }
   const snapshot = await ordersCollection(db).get();
-  const deletes = snapshot.docs
-    .filter((doc) => doc.data().status === "Completed")
-    .map((doc) => ordersCollection(db).doc(doc.id).delete());
-  await Promise.all(deletes);
-  return { count: deletes.length };
+  const updates = snapshot.docs
+    .filter((doc) => {
+      const d = doc.data();
+      return d.status === "Completed" || d.status === "Payment Done" || d.paymentStatus === "Paid";
+    })
+    .map((doc) => ordersCollection(db).doc(doc.id).update({ archived: 1 }));
+  await Promise.all(updates);
+  return { count: updates.length };
 }
 
 export async function updateOrder(db, id, updates) {
@@ -1229,13 +1244,13 @@ export async function deleteOrder(db, id) {
     const order = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
     if (!order) return { id };
 
-    await db.run("DELETE FROM order_items WHERE order_id = ?", [id]);
-    await db.run("DELETE FROM orders WHERE id = ?", [id]);
+    // Soft-archive order so it clears from screen views but is preserved in reports
+    await db.run("UPDATE orders SET archived = 1 WHERE id = ?", [id]);
 
     if (order.table_id) {
       await db.run(
-        "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ? AND current_order_id = ?",
-        [new Date().toISOString(), order.table_id, id]
+        "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ?",
+        [new Date().toISOString()]
       );
     }
 
@@ -1245,8 +1260,7 @@ export async function deleteOrder(db, id) {
   const docRef = ordersCollection(db).doc(id);
   const snapshot = await docRef.get();
   if (!snapshot.exists) return { id };
-  const order = snapshot.data();
-  await docRef.delete();
+  await docRef.update({ archived: 1 });
 
   if (order.tableId) {
     await tablesCollection(db)

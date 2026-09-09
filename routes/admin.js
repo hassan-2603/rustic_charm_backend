@@ -273,7 +273,8 @@ router.delete("/tables/:id", async (req, res, next) => {
 router.get("/orders", async (req, res, next) => {
   try {
     const includeCompleted = req.query.includeCompleted === "true" || req.query.all === "true";
-    const orders = await getOrders(req.app.locals.db, { includeCompleted });
+    const forReports = req.query.forReports === "true" || req.query.reports === "true";
+    const orders = await getOrders(req.app.locals.db, { includeCompleted, forReports });
     res.json(buildApiResponse(orders));
   } catch (err) {
     next(buildApiError(err.message, 500));

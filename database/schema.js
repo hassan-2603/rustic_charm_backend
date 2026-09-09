@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS orders (
   waiter_name VARCHAR(255),
   accepted_at TIMESTAMP NULL,
   served_at TIMESTAMP NULL,
+  completed_at TIMESTAMP NULL,
+  archived TINYINT(1) NOT NULL DEFAULT 0,
   description TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -224,7 +226,8 @@ export async function initializeSchema(db) {
       "ALTER TABLE orders ADD COLUMN alcohol_discount_amount DOUBLE",
       "ALTER TABLE orders ADD COLUMN payment_splits TEXT",
       "ALTER TABLE orders ADD COLUMN tip_amount DOUBLE DEFAULT 0",
-      "ALTER TABLE orders ADD COLUMN completed_at TIMESTAMP NULL"
+      "ALTER TABLE orders ADD COLUMN completed_at TIMESTAMP NULL",
+      "ALTER TABLE orders ADD COLUMN archived TINYINT(1) DEFAULT 0"
     ];
     for (const stmt of optionalColumns) {
       try {
