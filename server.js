@@ -16,6 +16,7 @@ import connectorRouter from "./routes/connector.js";
 import { getCategories, getMenuItems, addMenuItem, deleteMenuItem, getOrders, getMenuVersion } from "./services/adminService.js";
 import { createOrder } from "./services/customerService.js";
 import { getOffers as getAdminOffers, addOffer as addAdminOffer, updateOffer as updateAdminOffer, deleteOffer as deleteAdminOffer } from "./services/offerService.js";
+import { translateBatch } from "./services/translationService.js";
 
 dotenv.config();
 
@@ -340,36 +341,20 @@ app.post("/api/orders", async (req, res) => {
   }
 });
 
-// AI Menu Translation Endpoint
+// Menu Translation Endpoint (supports high-precision culinary translation & selective missing languages)
 app.post("/api/translate-menu", async (req, res) => {
   try {
-    if (!ai) {
-      return res.status(500).json({ error: "Gemini AI is not configured" });
-    }
-    const { items, languages = ["Russian", "German", "Spanish", "Kazakh", "Hebrew", "Japanese", "Korean"] } = req.body;
+    const { items, languages } = req.body;
     if (!items || !Array.isArray(items)) {
       return res.status(400).json({ error: "Invalid items array provided" });
     }
 
-    const promptLines = items.map((item, idx) => {
-      const name = typeof item.name === "object" ? item.name.English : item.name;
-      const desc = typeof item.description === "object" ? item.description.English : item.description || "";
-      return `Item ${idx + 1}::\nName: ${name}\nDescription: ${desc}\n`;
-    });
+    const formattedItems = items.map((item) => ({
+      ...item,
+      languages: item.languages || item.missingLanguages || languages || undefined,
+    }));
 
-    const prompt = `You are a professional restaurant menu translator. Translate the following food names and descriptions into the languages: ${languages.join(", ")}.
-Return ONLY valid JSON array matching the order of items. Each element should be an object with two keys: "name" and "description", each containing a map of language->translation.
-${promptLines.join("\n")}`;
-
-    const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: prompt,
-    });
-
-    let text = response.text?.trim() || "";
-    text = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-    const translations = JSON.parse(text);
-
+    const translations = await translateBatch(formattedItems);
     res.json({ translations });
   } catch (err) {
     res.status(500).json({ error: err.message });

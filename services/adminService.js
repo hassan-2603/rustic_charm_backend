@@ -779,7 +779,8 @@ export async function updateOrder(db, id, updates) {
     if (updates.tableId !== undefined) {
       table = await db.get("SELECT * FROM tables WHERE id = ?", [updates.tableId]);
       if (!table) throw new Error("Selected table was not found");
-      if (table.id !== currentOrder.table_id && table.occupied && table.current_order_id && table.current_order_id !== id) {
+      const isDiff = table.id !== currentOrder.table_id && (!currentOrder.table_reference || table.table_key !== currentOrder.table_reference);
+      if (isDiff && (table.occupied || table.status === 'occupied') && table.current_order_id && table.current_order_id !== id) {
         throw new Error("Selected table is occupied");
       }
     }
@@ -825,13 +826,22 @@ export async function updateOrder(db, id, updates) {
       params.push(id);
       await tx.run(`UPDATE orders SET ${clauses} WHERE id = ?`, params);
 
-      if (table && table.id !== currentOrder.table_id) {
-        const oldTableParams = [now, currentOrder.table_id, id];
-        if (currentOrder.session_id) oldTableParams.push(currentOrder.session_id);
-        await tx.run(
-          `UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ? AND (current_order_id = ?${currentOrder.session_id ? " OR current_session_id = ?" : ""})`,
-          oldTableParams
-        );
+      if (table && (table.id !== currentOrder.table_id || (currentOrder.table_reference && table.table_key !== currentOrder.table_reference))) {
+        const oldTableId = currentOrder.table_id || (currentOrder.table_reference ? (await tx.get("SELECT id FROM tables WHERE table_key = ? OR id = ?", [currentOrder.table_reference, currentOrder.table_reference]))?.id : null);
+
+        if (oldTableId && oldTableId !== table.id) {
+          const remainingOrders = await tx.get(
+            "SELECT COUNT(*) as count FROM orders WHERE (table_id = ? OR table_reference = ?) AND id != ? AND status NOT IN ('Completed', 'Cancelled', 'Rejected') AND archived = 0",
+            [oldTableId, currentOrder.table_reference || "", id]
+          );
+          if (!remainingOrders || Number(remainingOrders.count) === 0) {
+            await tx.run(
+              "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ?",
+              [now, oldTableId]
+            );
+          }
+        }
+
         await tx.run(
           "UPDATE tables SET occupied = 1, status = 'occupied', current_order_id = ?, current_session_id = ?, updated_at = ? WHERE id = ?",
           [id, currentOrder.session_id || "", now, table.id]
@@ -866,7 +876,24 @@ export async function updateOrder(db, id, updates) {
         }
       }
     });
-    return { id, ...updates, ...(table ? { tableId: table.id, tableReference: table.table_key, tableNumber: table.table_number, tableArea: table.area, tableLabel: table.display_name } : {}) };
+    return {
+      id,
+      ...updates,
+      ...(table
+        ? {
+            tableId: table.id,
+            tableReference: table.table_key,
+            tableNumber: table.table_number,
+            tableArea: table.area,
+            tableLabel: table.display_name,
+            table_id: table.id,
+            table_reference: table.table_key,
+            table_number: table.table_number,
+            table_area: table.area,
+            table_label: table.display_name,
+          }
+        : {}),
+    };
   }
   await ordersCollection(db).doc(id).update(updates);
   return { id, ...updates };

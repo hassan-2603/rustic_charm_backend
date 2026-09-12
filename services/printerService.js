@@ -128,10 +128,17 @@ export async function savePrinterConfig(db, printerId, settings) {
   return getPrinterConfig(db, printerId);
 }
 
-/** Heartbeat: called every time the connector polls for jobs. */
+const lastSeenThrottles = new Map();
+const HEARTBEAT_THROTTLE_MS = 8000;
+
+/** Heartbeat: called every time the connector polls for jobs. Throttled to avoid unnecessary DB writes. */
 export async function markPrinterSeen(db, printerId) {
   if (!["bill", "kot"].includes(printerId)) return;
-  await db.run("UPDATE printers SET last_seen_at = ? WHERE id = ?", [new Date().toISOString(), printerId]);
+  const now = Date.now();
+  const lastUpdate = lastSeenThrottles.get(printerId) || 0;
+  if (now - lastUpdate < HEARTBEAT_THROTTLE_MS) return;
+  lastSeenThrottles.set(printerId, now);
+  await db.run("UPDATE printers SET last_seen_at = ? WHERE id = ?", [new Date(now).toISOString(), printerId]);
 }
 
 async function getOrderForPrint(db, orderId) {
@@ -195,6 +202,21 @@ function resolveSection(item, config = {}) {
   return "Food";
 }
 
+function formatIndiaDateTime(dateInput) {
+  const d = dateInput ? (dateInput instanceof Date ? dateInput : new Date(dateInput)) : new Date();
+  const validDate = isNaN(d.getTime()) ? new Date() : d;
+  return validDate.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+}
+
 function buildBillPayload(order, billSectionsConfig) {
   const { foodItems, alcoholItems, foodTotal, alcoholTotal } = splitItemsByCategory(order.items, billSectionsConfig);
   const toLine = (item) => ({
@@ -211,7 +233,7 @@ function buildBillPayload(order, billSectionsConfig) {
     customerName: order.customerName,
     customerPhone: order.customerPhone,
     waiterName: order.waiterName,
-    date: new Date(order.createdAt || Date.now()).toLocaleString(),
+    date: formatIndiaDateTime(order.createdAt || Date.now()),
     items: (order.items || []).map(toLine),
     foodItems: foodItems.map(toLine),
     alcoholItems: alcoholItems.map(toLine),
@@ -233,7 +255,7 @@ function buildKotPayload(order) {
     orderNumber: order.orderNumber,
     tableNumber: order.tableLabel,
     waiterName: order.waiterName,
-    date: new Date().toLocaleString(),
+    date: formatIndiaDateTime(),
     items: (order.items || []).map((item) => ({ name: item.name, quantity: Number(item.quantity || 1) })),
     addedItems: order.addedItems ? order.addedItems.map((item) => ({ name: item.name, quantity: Number(item.quantity || 1) })) : [],
     removedItems: order.removedItems ? order.removedItems.map((item) => ({ name: item.name, quantity: Number(item.quantity || 1) })) : [],
