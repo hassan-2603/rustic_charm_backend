@@ -8,6 +8,7 @@ import {
   getOrderById,
   createWaiterCall,
   requestBill,
+  submitMenuItemFeedback,
 } from "../services/customerService.js";
 import { createPrintJob } from "../services/printerService.js";
 
@@ -120,6 +121,23 @@ router.post("/request-bill", async (req, res, next) => {
     res.json(buildApiResponse(result));
   } catch (err) {
     next(buildApiError(err.message || "Unable to request bill", err.status || 500));
+  }
+});
+
+router.post("/feedback", async (req, res, next) => {
+  try {
+    const { menuItemId, menuItemName, feedback } = req.body;
+    if (!feedback || !String(feedback).trim()) {
+      return next(buildApiError("Feedback text is required", 400));
+    }
+    const result = await submitMenuItemFeedback(req.app.locals.db, {
+      menuItemId,
+      menuItemName,
+      feedback,
+    });
+    res.status(201).json(buildApiResponse(result));
+  } catch (err) {
+    next(buildApiError(err.message || "Unable to submit feedback", err.status || 500));
   }
 });
 

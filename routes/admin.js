@@ -73,7 +73,9 @@ import {
   getKotSections,
   setKotSections,
   getBillSections,
-  setBillSections
+  setBillSections,
+  getMenuItemFeedbacks,
+  markFeedbacksAsDownloaded
 } from "../services/adminService.js";
 import {
   getOffers,
@@ -692,6 +694,25 @@ router.post("/print-jobs/:id/retry", async (req, res, next) => {
     res.json(buildApiResponse(job));
   } catch (err) {
     next(buildApiError(err.message, err.status || 500));
+  }
+});
+
+router.get("/feedbacks", async (req, res, next) => {
+  try {
+    const feedbacks = await getMenuItemFeedbacks(req.app.locals.db);
+    res.json(buildApiResponse(feedbacks));
+  } catch (err) {
+    next(buildApiError(err.message || "Failed to load feedbacks", err.status || 500));
+  }
+});
+
+router.post("/feedbacks/mark-downloaded", async (req, res, next) => {
+  try {
+    const { ids } = req.body || {};
+    const result = await markFeedbacksAsDownloaded(req.app.locals.db, ids);
+    res.json(buildApiResponse(result));
+  } catch (err) {
+    next(buildApiError(err.message || "Failed to mark feedbacks as downloaded", err.status || 500));
   }
 });
 

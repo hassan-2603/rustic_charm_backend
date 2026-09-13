@@ -282,12 +282,68 @@ export async function getMenuItems(db, lang) {
       const rawName = parseJsonField(row.name);
       const rawDesc = parseJsonField(row.description) || "";
       const itemName = localized?.name || (typeof rawName === "object" && rawName !== null ? (rawName[targetLang || "en"] || rawName.en || rawName.English || Object.values(rawName)[0]) : rawName);
-      const itemDesc = localized?.description || (typeof rawDesc === "object" && rawDesc !== null ? (rawDesc[targetLang || "en"] || rawDesc.en || rawDesc.English || Object.values(rawDesc)[0] || "") : rawDesc);
+
+      let itemDesc = "";
+      if (localized?.description) {
+        itemDesc = String(localized.description).trim();
+      } else if (typeof rawDesc === "object" && rawDesc !== null) {
+        if (targetLang && targetLang !== "en") {
+          itemDesc = rawDesc[targetLang] || Object.entries(rawDesc).find(([k]) => k.toLowerCase() === targetLang.toLowerCase())?.[1] || "";
+        } else {
+          itemDesc = rawDesc.English || rawDesc.en || rawDesc.english || "";
+        }
+      } else {
+        const strDesc = String(rawDesc || "").trim();
+        if (strDesc.startsWith("{") && strDesc.endsWith("}")) {
+          try {
+            const parsed = JSON.parse(strDesc);
+            if (parsed && typeof parsed === "object") {
+              if (targetLang && targetLang !== "en") {
+                itemDesc = parsed[targetLang] || Object.entries(parsed).find(([k]) => k.toLowerCase() === targetLang.toLowerCase())?.[1] || "";
+              } else {
+                itemDesc = parsed.English || parsed.en || parsed.english || "";
+              }
+            }
+          } catch {
+            itemDesc = "";
+          }
+        } else {
+          itemDesc = strDesc === "[object Object]" ? "" : (targetLang && targetLang !== "en" ? "" : strDesc);
+        }
+      }
+
+      const rawCat = parseJsonField(row.cat_join_name || row.category_name || "");
+      let itemCategory = "";
+      if (typeof rawCat === "object" && rawCat !== null) {
+        if (targetLang && targetLang !== "en") {
+          itemCategory = rawCat[targetLang] || Object.entries(rawCat).find(([k]) => k.toLowerCase() === targetLang.toLowerCase())?.[1] || "";
+        } else {
+          itemCategory = rawCat.English || rawCat.en || rawCat.english || Object.values(rawCat)[0] || "";
+        }
+      } else {
+        const strCat = String(rawCat || "").trim();
+        if (strCat.startsWith("{") && strCat.endsWith("}")) {
+          try {
+            const parsed = JSON.parse(strCat);
+            if (parsed && typeof parsed === "object") {
+              if (targetLang && targetLang !== "en") {
+                itemCategory = parsed[targetLang] || Object.entries(parsed).find(([k]) => k.toLowerCase() === targetLang.toLowerCase())?.[1] || "";
+              } else {
+                itemCategory = parsed.English || parsed.en || parsed.english || "";
+              }
+            }
+          } catch {
+            itemCategory = "";
+          }
+        } else {
+          itemCategory = strCat === "[object Object]" ? "" : strCat;
+        }
+      }
 
       return {
         id: row.id,
         categoryId: row.category_id,
-        category: row.cat_join_name || row.category_name || row.category_id || "",
+        category: itemCategory || row.category_id || "",
         name: itemName,
         description: itemDesc,
         price: Number(row.price || 0),
@@ -1530,4 +1586,27 @@ export async function setBillSections(db, config) {
     ["bill_sections", "bill_sections", json, now]
   );
   return config;
+}
+
+export async function getMenuItemFeedbacks(db) {
+  const rows = await db.all(
+    `SELECT id, menu_item_id AS menuItemId, menu_item_name AS menuItemName, feedback, created_at AS createdAt
+     FROM menu_item_feedbacks
+     WHERE downloaded = 0
+     ORDER BY created_at ASC`
+  );
+  return rows || [];
+}
+
+export async function markFeedbacksAsDownloaded(db, ids = []) {
+  if (Array.isArray(ids) && ids.length > 0) {
+    const placeholders = ids.map(() => "?").join(",");
+    await db.run(
+      `UPDATE menu_item_feedbacks SET downloaded = 1 WHERE id IN (${placeholders})`,
+      ids
+    );
+  } else {
+    await db.run("UPDATE menu_item_feedbacks SET downloaded = 1 WHERE downloaded = 0");
+  }
+  return { success: true };
 }

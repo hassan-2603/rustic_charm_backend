@@ -204,6 +204,15 @@ CREATE TABLE IF NOT EXISTS order_bill_splits (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS menu_item_feedbacks (
+  id VARCHAR(255) PRIMARY KEY,
+  menu_item_id VARCHAR(255),
+  menu_item_name VARCHAR(255) NOT NULL,
+  feedback TEXT NOT NULL,
+  downloaded TINYINT(1) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 `;
 
 export async function initializeSchema(db) {
@@ -258,6 +267,21 @@ export async function initializeSchema(db) {
       if (!String(indexErr.message).includes("Duplicate key name") && !String(indexErr.message).includes("already exists")) {
         console.warn("[schema] Note on order_items index check/creation:", indexErr.message);
       }
+    }
+
+    try {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS menu_item_feedbacks (
+          id VARCHAR(255) PRIMARY KEY,
+          menu_item_id VARCHAR(255),
+          menu_item_name VARCHAR(255) NOT NULL,
+          feedback TEXT NOT NULL,
+          downloaded TINYINT(1) NOT NULL DEFAULT 0,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+    } catch (fbErr) {
+      console.warn("[schema] Note on menu_item_feedbacks table check:", fbErr.message);
     }
 
     console.log("✓ Database schema initialized");

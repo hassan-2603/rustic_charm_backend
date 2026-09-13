@@ -572,6 +572,23 @@ async function createWaiterCall(db, tableReference, sessionId, customerName, cus
   throw new Error("SQLite-backed backend requires SQLite database access");
 }
 
+export async function submitMenuItemFeedback(db, { menuItemId, menuItemName, feedback }) {
+  if (!feedback || !String(feedback).trim()) {
+    throw new Error("Feedback cannot be empty");
+  }
+  const id = crypto.randomUUID();
+  const name = String(menuItemName || "").trim() || "Unknown Item";
+  const text = String(feedback).trim();
+  const itemId = menuItemId ? String(menuItemId).trim() : null;
+
+  await db.run(
+    "INSERT INTO menu_item_feedbacks (id, menu_item_id, menu_item_name, feedback, downloaded) VALUES (?, ?, ?, ?, 0)",
+    [id, itemId, name, text]
+  );
+
+  return { id, menuItemName: name, success: true };
+}
+
 export {
   listCustomerTables,
   getSessionInfo,
