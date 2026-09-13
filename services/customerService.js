@@ -379,7 +379,14 @@ async function getOrdersBySession(db, sessionId) {
   }
 
   if (isSqliteDb(db)) {
-    const rows = await db.all("SELECT * FROM orders WHERE session_id = ? ORDER BY created_at DESC", [sessionId]);
+    const rows = await db.all(
+      `SELECT o.*, w.name AS lookup_waiter_name 
+       FROM orders o 
+       LEFT JOIN waiters w ON o.waiter_id = w.id 
+       WHERE o.session_id = ? 
+       ORDER BY o.created_at DESC`,
+      [sessionId]
+    );
     const orders = [];
     for (const row of rows) {
       const items = await db.all("SELECT * FROM order_items WHERE order_id = ? ORDER BY created_at ASC", [row.id]);
@@ -397,7 +404,7 @@ async function getOrdersBySession(db, sessionId) {
         customerName: row.customer_name,
         customerPhone: row.customer_phone,
         waiterId: row.waiter_id,
-        waiterName: row.waiter_name,
+        waiterName: row.waiter_name || row.lookup_waiter_name || null,
         acceptedAt: row.accepted_at,
         servedAt: row.served_at,
         completedAt: row.completed_at,

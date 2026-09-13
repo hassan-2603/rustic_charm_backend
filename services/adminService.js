@@ -663,7 +663,13 @@ export async function getOrders(db, { includeCompleted = false, forReports = fal
     } else {
       whereClause = "WHERE status NOT IN ('Completed', 'Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL)";
     }
-    const rows = await db.all(`SELECT * FROM orders ${whereClause} ORDER BY created_at DESC`);
+    const rows = await db.all(
+      `SELECT o.*, w.name AS lookup_waiter_name 
+       FROM orders o 
+       LEFT JOIN waiters w ON o.waiter_id = w.id 
+       ${whereClause.replace(/\bstatus\b/g, 'o.status').replace(/\barchived\b/g, 'o.archived')} 
+       ORDER BY o.created_at DESC`
+    );
     if (!rows || rows.length === 0) {
       return [];
     }
@@ -724,7 +730,7 @@ export async function getOrders(db, { includeCompleted = false, forReports = fal
         foodDiscountAmount: row.food_discount_amount,
         alcoholDiscountAmount: row.alcohol_discount_amount,
         waiterId: row.waiter_id,
-        waiterName: row.waiter_name,
+        waiterName: row.waiter_name || row.lookup_waiter_name || null,
         description: row.description,
         acceptedAt: row.accepted_at,
         servedAt: row.served_at,
@@ -934,6 +940,8 @@ export async function updateOrder(db, id, updates) {
     });
     return {
       id,
+      waiterId: updates.waiterId !== undefined ? updates.waiterId : currentOrder.waiter_id,
+      waiterName: updates.waiterName !== undefined ? updates.waiterName : currentOrder.waiter_name,
       ...updates,
       ...(table
         ? {
@@ -1035,6 +1043,8 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
 
     return {
       id,
+      waiterId: updatedOrderRow.waiter_id,
+      waiterName: updatedOrderRow.waiter_name,
       total: Number(updatedOrderRow.total || 0),
       description: updatedOrderRow.description || "",
       finalTotal:
@@ -1146,6 +1156,8 @@ export async function removeOrderItems(db, id, itemIds) {
 
     return {
       id,
+      waiterId: updatedOrderRow.waiter_id,
+      waiterName: updatedOrderRow.waiter_name,
       total: Number(updatedOrderRow.total || 0),
       description: updatedOrderRow.description || "",
       finalTotal:
