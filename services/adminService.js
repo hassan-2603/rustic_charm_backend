@@ -782,8 +782,8 @@ export async function createAdminOrder(db, order) {
   const orderNumber = await generateOrderNumber(db);
   const now = new Date().toISOString();
   await db.run(
-    "INSERT INTO orders (id, table_id, table_reference, table_number, table_area, table_label, order_number, order_source, status, total, waiter_id, waiter_name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [id, table.id, table.table_key, table.table_number, table.area, table.display_name, orderNumber, "admin", "Accepted", Number(order.total) || 0, waiter.id, waiter.name, order.description || "", now, now]
+    "INSERT INTO orders (id, table_id, table_reference, table_number, table_area, table_label, order_number, order_source, status, total, waiter_id, waiter_name, description, accepted_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [id, table.id, table.table_key, table.table_number, table.area, table.display_name, orderNumber, "admin", "Accepted", Number(order.total) || 0, waiter.id, waiter.name, order.description || "", now, now, now]
   );
   for (const item of order.items) {
     await db.run(
@@ -832,11 +832,12 @@ export async function deleteAllCompletedOrders(db) {
 
 export async function updateOrder(db, id, updates) {
   if (!id) throw new Error("Order ID is required");
+  const now = new Date().toISOString();
+
   if (isSqliteDb(db)) {
     const currentOrder = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
     if (!currentOrder) throw new Error("Order not found");
 
-    const now = new Date().toISOString();
     let table;
     if (updates.tableId !== undefined) {
       table = await db.get("SELECT * FROM tables WHERE id = ?", [updates.tableId]);
@@ -845,6 +846,27 @@ export async function updateOrder(db, id, updates) {
       if (isDiff && (table.occupied || table.status === 'occupied') && table.current_order_id && table.current_order_id !== id) {
         throw new Error("Selected table is occupied");
       }
+    }
+
+    const autoAcceptedAt =
+      updates.acceptedAt !== undefined
+        ? updates.acceptedAt
+        : (updates.status === "Accepted" || updates.status === "Preparing") && !currentOrder.accepted_at
+        ? now
+        : undefined;
+
+    const autoCompletedAt =
+      updates.completedAt !== undefined
+        ? updates.completedAt
+        : updates.status === "Completed" && !currentOrder.completed_at
+        ? now
+        : undefined;
+
+    let waiterId = updates.waiterId !== undefined ? updates.waiterId : (updates.waiter?.id !== undefined ? updates.waiter.id : undefined);
+    let waiterName = updates.waiterName !== undefined ? updates.waiterName : (updates.waiter?.name !== undefined ? updates.waiter.name : undefined);
+    if (waiterId && !waiterName) {
+      const w = await db.get("SELECT name FROM waiters WHERE id = ?", [waiterId]);
+      if (w && w.name) waiterName = w.name;
     }
 
     const orderUpdates = {
@@ -872,11 +894,11 @@ export async function updateOrder(db, id, updates) {
       alcohol_discount_percent: updates.alcoholDiscountPercent,
       food_discount_amount: updates.foodDiscountAmount,
       alcohol_discount_amount: updates.alcoholDiscountAmount,
-      waiter_id: updates.waiterId,
-      waiter_name: updates.waiterName,
-      accepted_at: updates.acceptedAt,
+      waiter_id: waiterId,
+      waiter_name: waiterName,
+      accepted_at: autoAcceptedAt,
       served_at: updates.servedAt,
-      completed_at: updates.completedAt,
+      completed_at: autoCompletedAt,
       updated_at: now,
     };
     const entries = Object.entries(orderUpdates).filter(([, value]) => value !== undefined);
