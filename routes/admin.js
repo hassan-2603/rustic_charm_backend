@@ -5,30 +5,20 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 import { buildApiResponse, buildApiError } from "../services/apiService.js";
 import { adminAuthMiddleware } from "../middleware/auth.js";
+import { uploadImageToCloudinary, validateImageBuffer } from "../services/storageService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Ensure the uploads directory exists before multer tries to write to it
+// Ensure the uploads directory exists for legacy static files
 const uploadsDir = path.join(__dirname, "../images/uploads");
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
-  console.log("[admin] Created uploads directory:", uploadsDir);
 }
 
-// Multer config: store uploaded menu images in backend/images/uploads/
-const uploadStorage = multer.diskStorage({
-  destination(req, file, cb) {
-    cb(null, path.join(__dirname, "../images/uploads"));
-  },
-  filename(req, file, cb) {
-    const ext = path.extname(file.originalname);
-    const safeName = `${Date.now()}-${Math.round(Math.random() * 1e6)}${ext}`;
-    cb(null, safeName);
-  },
-});
+// Multer config: keep uploaded menu images in memory to stream directly to Cloudinary
 const upload = multer({
-  storage: uploadStorage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB max
   fileFilter(req, file, cb) {
     if (!file.mimetype.startsWith("image/")) {
@@ -106,22 +96,43 @@ router.options('*', (req, res) => {
 router.use(adminAuthMiddleware);
 
 // ==========================================
-// IMAGE UPLOAD
+// IMAGE UPLOAD (CLOUDINARY)
 // ==========================================
 router.post("/upload-image", (req, res, next) => {
-  upload.single("image")(req, res, (err) => {
+  upload.single("image")(req, res, async (err) => {
     if (err) {
       // Multer errors (file too large, wrong type, etc.)
-      const msg = err.message || "File upload error";
+      const msg = err.code === "LIMIT_FILE_SIZE"
+        ? "File too large. Maximum size is 10MB."
+        : (err.message || "File upload error");
       console.error("[upload-image] multer error:", msg);
       return res.status(400).json({ ok: false, error: msg });
     }
-    if (!req.file) {
+    if (!req.file || !req.file.buffer) {
       return res.status(400).json({ ok: false, error: "No image file provided" });
     }
-    const imageUrl = `/images/uploads/${req.file.filename}`;
-    console.log("[upload-image] saved:", imageUrl);
-    res.json(buildApiResponse({ imageUrl }));
+
+    try {
+      // Validate image content / magic bytes
+      validateImageBuffer(req.file.buffer, req.file.mimetype);
+
+      // Upload to Cloudinary folder rustic-charm/menu and get optimized HTTPS URL
+      const result = await uploadImageToCloudinary(req.file.buffer, {
+        originalFilename: req.file.originalname,
+      });
+
+      console.log("[upload-image] saved to Cloudinary:", result.url);
+      res.json(buildApiResponse({ imageUrl: result.url }));
+    } catch (uploadErr) {
+      console.error("[upload-image] upload error:", uploadErr.message);
+      const status = uploadErr.message.includes("Unsupported image format") || uploadErr.message.includes("exceeds the maximum")
+        ? 400
+        : 500;
+      return res.status(status).json({
+        ok: false,
+        error: uploadErr.message || "Failed to upload image",
+      });
+    }
   });
 });
 
