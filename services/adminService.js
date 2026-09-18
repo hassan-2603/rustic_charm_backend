@@ -313,12 +313,31 @@ export async function getMenuItems(db, lang) {
       }
 
       const rawCat = parseJsonField(row.cat_join_name || row.category_name || "");
+      const codeToNameMap = {
+        en: "english",
+        ru: "russian",
+        de: "german",
+        es: "spanish",
+        kk: "kazakh",
+        he: "hebrew",
+        ja: "japanese",
+        ko: "korean",
+      };
+      const fullTargetLang = targetLang ? codeToNameMap[targetLang] || targetLang : null;
+
+      let englishCategory = "";
       let itemCategory = "";
+
       if (typeof rawCat === "object" && rawCat !== null) {
+        englishCategory = rawCat.English || rawCat.en || rawCat.english || Object.values(rawCat)[0] || "";
         if (targetLang && targetLang !== "en") {
-          itemCategory = rawCat[targetLang] || Object.entries(rawCat).find(([k]) => k.toLowerCase() === targetLang.toLowerCase())?.[1] || "";
+          itemCategory =
+            rawCat[targetLang] ||
+            (fullTargetLang ? rawCat[fullTargetLang] || Object.entries(rawCat).find(([k]) => k.toLowerCase() === fullTargetLang)?.[1] : null) ||
+            Object.entries(rawCat).find(([k]) => k.toLowerCase() === targetLang.toLowerCase())?.[1] ||
+            englishCategory;
         } else {
-          itemCategory = rawCat.English || rawCat.en || rawCat.english || Object.values(rawCat)[0] || "";
+          itemCategory = englishCategory;
         }
       } else {
         const strCat = String(rawCat || "").trim();
@@ -326,31 +345,43 @@ export async function getMenuItems(db, lang) {
           try {
             const parsed = JSON.parse(strCat);
             if (parsed && typeof parsed === "object") {
+              englishCategory = parsed.English || parsed.en || parsed.english || Object.values(parsed)[0] || "";
               if (targetLang && targetLang !== "en") {
-                itemCategory = parsed[targetLang] || Object.entries(parsed).find(([k]) => k.toLowerCase() === targetLang.toLowerCase())?.[1] || "";
+                itemCategory =
+                  parsed[targetLang] ||
+                  (fullTargetLang ? parsed[fullTargetLang] || Object.entries(parsed).find(([k]) => k.toLowerCase() === fullTargetLang)?.[1] : null) ||
+                  Object.entries(parsed).find(([k]) => k.toLowerCase() === targetLang.toLowerCase())?.[1] ||
+                  englishCategory;
               } else {
-                itemCategory = parsed.English || parsed.en || parsed.english || "";
+                itemCategory = englishCategory;
               }
             }
           } catch {
             itemCategory = "";
+            englishCategory = "";
           }
         } else {
-          itemCategory = strCat === "[object Object]" ? "" : strCat;
+          const plain = strCat === "[object Object]" ? "" : strCat;
+          englishCategory = plain;
+          itemCategory = plain;
         }
       }
+
+      const isItemAvailable = toBoolean(row.is_available);
 
       return {
         id: row.id,
         categoryId: row.category_id,
-        category: itemCategory || row.category_id || "",
+        category: englishCategory || itemCategory || row.category_name || row.category_id || "",
+        categoryLocalized: itemCategory || englishCategory || "",
         name: itemName,
         description: itemDesc,
         price: Number(row.price || 0),
         imageUrl: row.image_url || "",
         image: row.image_url || "",
         isVeg: toBoolean(row.is_veg),
-        isAvailable: toBoolean(row.is_available),
+        isAvailable: isItemAvailable,
+        available: isItemAvailable,
         isPopular: toBoolean(row.is_popular),
         prepTime: row.prep_time,
         rating: Number(row.rating || 0),
