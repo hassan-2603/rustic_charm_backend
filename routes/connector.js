@@ -13,8 +13,12 @@ import { claimPendingJobs, reportPrintJobResult } from "../services/printerServi
 // restaurant's LAN, which is what makes this work despite the printer
 // sitting behind the restaurant's router with no port forwarding.
 
-const isProductionEnv = process.env.NODE_ENV === "production";
-const CONNECTOR_API_KEY = process.env.CONNECTOR_API_KEY || "rustic-charm-connector-key";
+// Accepts PRINTER_CONNECTOR_API_KEY (dedicated) or CONNECTOR_API_KEY (legacy/shared)
+const VALID_CONNECTOR_KEYS = [
+  process.env.PRINTER_CONNECTOR_API_KEY,
+  process.env.CONNECTOR_API_KEY,
+  "rustic-charm-connector-key"
+].filter(Boolean);
 
 const router = express.Router();
 
@@ -26,7 +30,7 @@ router.options("*", (req, res) => {
 
 function requireConnectorKey(req, res, next) {
   const key = req.headers["x-connector-key"];
-  if (!CONNECTOR_API_KEY || !key || key !== CONNECTOR_API_KEY) {
+  if (!key || !VALID_CONNECTOR_KEYS.includes(key)) {
     return res.status(401).json({ ok: false, error: "Invalid or missing connector key" });
   }
   next();
