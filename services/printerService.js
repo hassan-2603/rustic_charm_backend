@@ -153,6 +153,26 @@ async function getOrderForPrint(db, orderId) {
        ORDER BY order_items.created_at ASC`,
     [orderId]
   );
+
+  const mappedItems = items.map((item) => ({
+    id: item.id,
+    name: item.name,
+    category: item.category_name || "",
+    categoryId: item.category_id || "",
+    quantity: Number(item.quantity || 0),
+    price: Number(item.price || 0),
+  }));
+
+  // Authoritative total strictly calculated from the order items
+  const itemsTotal = mappedItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
+  // Self-heal orders.total in the database if it ever became out of sync
+  if (Math.abs(Number(order.total || 0) - itemsTotal) > 0.01) {
+    db.run("UPDATE orders SET total = ? WHERE id = ?", [itemsTotal, orderId]).catch((err) => {
+      console.warn("[printerService] Auto-sync order total failed:", err.message);
+    });
+  }
+
   return {
     id: order.id,
     orderNumber: order.order_number,
@@ -161,24 +181,17 @@ async function getOrderForPrint(db, orderId) {
     customerPhone: order.customer_phone,
     waiterName: order.waiter_name,
     createdAt: order.created_at,
-    total: Number(order.total || 0),
+    total: itemsTotal,
     discountMode: order.discount_mode,
     discountAmount: Number(order.discount_amount || 0),
-    finalTotal: order.final_total !== null && order.final_total !== undefined ? Number(order.final_total) : Number(order.total || 0),
+    finalTotal: order.final_total !== null && order.final_total !== undefined ? Number(order.final_total) : itemsTotal,
     foodDiscountPercent: Number(order.food_discount_percent || 0),
     alcoholDiscountPercent: Number(order.alcohol_discount_percent || 0),
     foodDiscountAmount: Number(order.food_discount_amount || 0),
     alcoholDiscountAmount: Number(order.alcohol_discount_amount || 0),
     description: order.description,
     lastPrintedItems: order.last_printed_items ? (typeof order.last_printed_items === "string" ? JSON.parse(order.last_printed_items) : order.last_printed_items) : null,
-    items: items.map((item) => ({
-      id: item.id,
-      name: item.name,
-      category: item.category_name || "",
-      categoryId: item.category_id || "",
-      quantity: Number(item.quantity || 0),
-      price: Number(item.price || 0),
-    })),
+    items: mappedItems,
   };
 }
 
@@ -226,27 +239,51 @@ function buildBillPayload(order, billSectionsConfig) {
     price: Number(item.price || 0),
     amount: Number(item.price || 0) * Number(item.quantity || 1),
   });
+
+  // Strict dynamic total derived strictly from current items
+  const itemsTotal = foodTotal + alcoholTotal;
   const isCategoryDiscount = order.discountMode === "category";
+
+  let foodDiscountAmount = 0;
+  let alcoholDiscountAmount = 0;
+  let discountAmount = 0;
+  let finalTotal = itemsTotal;
+
+  if (isCategoryDiscount) {
+    const foodPercent = Math.max(0, Number(order.foodDiscountPercent || 0));
+    const alcoholPercent = Math.max(0, Number(order.alcoholDiscountPercent || 0));
+    foodDiscountAmount = Math.round((foodTotal * foodPercent) / 100);
+    alcoholDiscountAmount = Math.round((alcoholTotal * alcoholPercent) / 100);
+    discountAmount = foodDiscountAmount + alcoholDiscountAmount;
+    finalTotal = Math.max(0, (foodTotal - foodDiscountAmount) + (alcoholTotal - alcoholDiscountAmount));
+  } else if (order.discountAmount > 0) {
+    discountAmount = Number(order.discountAmount || 0);
+    finalTotal = Math.max(0, itemsTotal - discountAmount);
+  } else if (order.finalTotal !== null && order.finalTotal !== undefined && Number(order.finalTotal) < itemsTotal && Number(order.finalTotal) > 0) {
+    discountAmount = Math.max(0, itemsTotal - Number(order.finalTotal));
+    finalTotal = Number(order.finalTotal);
+  }
+
   return {
     orderNumber: order.orderNumber,
     tableNumber: order.tableLabel,
     customerName: order.customerName,
     customerPhone: order.customerPhone,
     waiterName: order.waiterName,
-    date: formatIndiaDateTime(order.createdAt || Date.now()),
+    date: formatIndiaDateTime(new Date()), // Exact time bill was printed
     items: (order.items || []).map(toLine),
     foodItems: foodItems.map(toLine),
     alcoholItems: alcoholItems.map(toLine),
     foodTotal,
     alcoholTotal,
-    total: order.total,
+    total: itemsTotal,
     discountMode: order.discountMode || null,
-    discountAmount: order.discountAmount || 0,
-    finalTotal: order.finalTotal,
-    foodDiscountPercent: isCategoryDiscount ? order.foodDiscountPercent || 0 : 0,
-    alcoholDiscountPercent: isCategoryDiscount ? order.alcoholDiscountPercent || 0 : 0,
-    foodDiscountAmount: isCategoryDiscount ? order.foodDiscountAmount || 0 : 0,
-    alcoholDiscountAmount: isCategoryDiscount ? order.alcoholDiscountAmount || 0 : 0,
+    discountAmount,
+    finalTotal,
+    foodDiscountPercent: isCategoryDiscount ? Number(order.foodDiscountPercent || 0) : 0,
+    alcoholDiscountPercent: isCategoryDiscount ? Number(order.alcoholDiscountPercent || 0) : 0,
+    foodDiscountAmount,
+    alcoholDiscountAmount,
   };
 }
 

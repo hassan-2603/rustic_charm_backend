@@ -1027,13 +1027,47 @@ export async function updateOrder(db, id, updates) {
   return { id, ...updates };
 }
 
+function recalculateOrderTotals(currentOrder, allItems) {
+  const newTotal = allItems.reduce((sum, row) => sum + Number(row.price || 0) * Number(row.quantity || 0), 0);
+  const updates = { total: newTotal };
+
+  const isCatDiscount = currentOrder.discount_mode === "category";
+  if (isCatDiscount) {
+    let foodSum = 0;
+    let alcSum = 0;
+    for (const it of allItems) {
+      const catText = String(it.category_name || it.category || "").toLowerCase();
+      const isAlc = ["beer", "wine", "liquor", "liqueur", "cocktail", "spirits", "alcohol", "whisky", "whiskey", "vodka", "rum", "gin", "tequila", "brandy"].some(k => catText.includes(k));
+      const lineAmt = Number(it.price || 0) * Number(it.quantity || 0);
+      if (isAlc) alcSum += lineAmt;
+      else foodSum += lineAmt;
+    }
+    const foodPercent = Math.max(0, Number(currentOrder.food_discount_percent || 0));
+    const alcPercent = Math.max(0, Number(currentOrder.alcohol_discount_percent || 0));
+    const foodDiscountAmount = Math.round((foodSum * foodPercent) / 100);
+    const alcoholDiscountAmount = Math.round((alcSum * alcPercent) / 100);
+    const discountAmount = foodDiscountAmount + alcoholDiscountAmount;
+
+    updates.food_discount_amount = foodDiscountAmount;
+    updates.alcohol_discount_amount = alcoholDiscountAmount;
+    updates.discount_amount = discountAmount;
+    updates.final_total = Math.max(0, (foodSum - foodDiscountAmount) + (alcSum - alcoholDiscountAmount));
+  } else if (currentOrder.discount_type === "percent" && Number(currentOrder.discount_value) > 0) {
+    const discountAmount = Math.round((newTotal * Number(currentOrder.discount_value)) / 100);
+    updates.discount_amount = discountAmount;
+    updates.final_total = Math.max(0, newTotal - discountAmount);
+  } else if (currentOrder.discount_amount !== null && currentOrder.discount_amount !== undefined && Number(currentOrder.discount_amount) > 0) {
+    updates.final_total = Math.max(0, newTotal - Number(currentOrder.discount_amount));
+  } else if (currentOrder.final_total !== null && currentOrder.final_total !== undefined) {
+    updates.final_total = newTotal;
+  }
+  return updates;
+}
+
 /**
  * Adds one or more items to an existing order (used by the "Add Item" flow
  * on both the Admin "View Details" drawer and the Waiter "My Orders" card).
- * This only inserts additional order_items / appends to the items array and
- * recalculates the order total — it never touches any other order field.
- * If the order already has a discount amount applied, finalTotal is kept in
- * sync (same discountAmount, recomputed against the new total).
+ * Recalculates order total dynamically from order_items.
  */
 export async function addOrderItems(db, id, itemsToAdd, description) {
   if (!id) throw new Error("Order ID is required");
@@ -1042,12 +1076,17 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
   }
 
   if (isSqliteDb(db)) {
-    const currentOrder = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
-    if (!currentOrder) throw new Error("Order not found");
-
     const now = new Date().toISOString();
 
     await db.transaction(async (tx) => {
+      let currentOrder;
+      try {
+        currentOrder = await tx.get("SELECT * FROM orders WHERE id = ? FOR UPDATE", [id]);
+      } catch {
+        currentOrder = await tx.get("SELECT * FROM orders WHERE id = ?", [id]);
+      }
+      if (!currentOrder) throw new Error("Order not found");
+
       for (const item of itemsToAdd) {
         const menuItemId = item.menuItemId || null;
         const insertQty = Math.max(1, Number(item.quantity) || 1);
@@ -1077,15 +1116,18 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
         }
       }
 
-      const allItems = await tx.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
-      const newTotal = allItems.reduce((sum, row) => sum + Number(row.price || 0) * Number(row.quantity || 0), 0);
-
-      const orderUpdates = { total: newTotal, updated_at: now };
+      const allItems = await tx.all(
+        `SELECT order_items.quantity, order_items.price, categories.name AS category_name, categories.id AS category_id
+         FROM order_items
+         LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+         LEFT JOIN categories ON menu_items.category_id = categories.id
+         WHERE order_items.order_id = ?`,
+        [id]
+      );
+      const totalsUpdates = recalculateOrderTotals(currentOrder, allItems);
+      const orderUpdates = { ...totalsUpdates, updated_at: now };
       if (description !== undefined && description !== null && String(description).trim() !== "") {
         orderUpdates.description = String(description).trim();
-      }
-      if (currentOrder.discount_amount) {
-        orderUpdates.final_total = Math.max(0, newTotal - Number(currentOrder.discount_amount));
       }
 
       const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
@@ -1167,12 +1209,17 @@ export async function removeOrderItems(db, id, itemIds) {
   }
 
   if (isSqliteDb(db)) {
-    const currentOrder = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
-    if (!currentOrder) throw new Error("Order not found");
-
     const now = new Date().toISOString();
 
     await db.transaction(async (tx) => {
+      let currentOrder;
+      try {
+        currentOrder = await tx.get("SELECT * FROM orders WHERE id = ? FOR UPDATE", [id]);
+      } catch {
+        currentOrder = await tx.get("SELECT * FROM orders WHERE id = ?", [id]);
+      }
+      if (!currentOrder) throw new Error("Order not found");
+
       for (const item of itemIds) {
         const itemId = typeof item === 'string' ? item : item.id;
         const qtyToRemove = typeof item === 'object' && item.quantity ? Number(item.quantity) : null;
@@ -1189,17 +1236,20 @@ export async function removeOrderItems(db, id, itemIds) {
         }
       }
 
-      const remaining = await tx.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
+      const remaining = await tx.all(
+        `SELECT order_items.quantity, order_items.price, categories.name AS category_name, categories.id AS category_id
+         FROM order_items
+         LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+         LEFT JOIN categories ON menu_items.category_id = categories.id
+         WHERE order_items.order_id = ?`,
+        [id]
+      );
       if (remaining.length === 0) {
         throw new Error("Cannot remove every item from an order \u2014 cancel the order instead if it's no longer needed.");
       }
 
-      const newTotal = remaining.reduce((sum, row) => sum + Number(row.price || 0) * Number(row.quantity || 0), 0);
-
-      const orderUpdates = { total: newTotal, updated_at: now };
-      if (currentOrder.discount_amount) {
-        orderUpdates.final_total = Math.max(0, newTotal - Number(currentOrder.discount_amount));
-      }
+      const totalsUpdates = recalculateOrderTotals(currentOrder, remaining);
+      const orderUpdates = { ...totalsUpdates, updated_at: now };
 
       const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
       const params = [...Object.values(orderUpdates), id];
@@ -1293,12 +1343,17 @@ export async function updateOrderItemPrices(db, id, updates) {
   }
 
   if (isSqliteDb(db)) {
-    const currentOrder = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
-    if (!currentOrder) throw new Error("Order not found");
-
     const now = new Date().toISOString();
 
     await db.transaction(async (tx) => {
+      let currentOrder;
+      try {
+        currentOrder = await tx.get("SELECT * FROM orders WHERE id = ? FOR UPDATE", [id]);
+      } catch {
+        currentOrder = await tx.get("SELECT * FROM orders WHERE id = ?", [id]);
+      }
+      if (!currentOrder) throw new Error("Order not found");
+
       for (const update of updates) {
         if (!update.id || update.newPrice === undefined) continue;
         await tx.run(
@@ -1307,13 +1362,16 @@ export async function updateOrderItemPrices(db, id, updates) {
         );
       }
 
-      const allItems = await tx.all("SELECT quantity, price FROM order_items WHERE order_id = ?", [id]);
-      const newTotal = allItems.reduce((sum, row) => sum + Number(row.price || 0) * Number(row.quantity || 0), 0);
-
-      const orderUpdates = { total: newTotal, updated_at: now };
-      if (currentOrder.discount_amount !== null && currentOrder.discount_amount !== undefined) {
-        orderUpdates.final_total = Math.max(0, newTotal - Number(currentOrder.discount_amount));
-      }
+      const allItems = await tx.all(
+        `SELECT order_items.quantity, order_items.price, categories.name AS category_name, categories.id AS category_id
+         FROM order_items
+         LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+         LEFT JOIN categories ON menu_items.category_id = categories.id
+         WHERE order_items.order_id = ?`,
+        [id]
+      );
+      const totalsUpdates = recalculateOrderTotals(currentOrder, allItems);
+      const orderUpdates = { ...totalsUpdates, updated_at: now };
 
       const clauses = Object.keys(orderUpdates).map((key) => `${key} = ?`).join(", ");
       const params = [...Object.values(orderUpdates), id];

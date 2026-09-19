@@ -71,6 +71,7 @@ export function openDatabase() {
     password: process.env.DB_PASSWORD,
     database: 'defaultdb',
     port: 19138,
+    timezone: 'Z',
     ssl: {
       rejectUnauthorized: false
     }
