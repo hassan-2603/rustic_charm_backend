@@ -43,8 +43,19 @@ function parseJsonField(value) {
 }
 
 function normalizeMenuText(value) {
-  if (typeof value === "object") return JSON.stringify(value);
-  return value ?? "";
+  if (value && typeof value === "object") {
+    return String(value.English || value.en || value.english || Object.values(value)[0] || "").trim();
+  }
+  const str = String(value ?? "").trim();
+  if (str.startsWith("{") && str.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(str);
+      if (parsed && typeof parsed === "object") {
+        return String(parsed.English || parsed.en || parsed.english || Object.values(parsed)[0] || "").trim();
+      }
+    } catch {}
+  }
+  return str;
 }
 
 /**
