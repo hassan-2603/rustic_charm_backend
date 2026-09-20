@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { calculateAuthoritativeBill } from "./billCalculationService.js";
+import { getEffectiveBillSections } from "./adminService.js";
 
 // A printer is considered OFFLINE if the connector hasn't polled for jobs
 // in this long. "Configured" (has an IP/name saved) is NOT the same as
@@ -331,8 +332,7 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
   const order = await getOrderForPrint(db, orderId);
 
   if (normalizedType === "BILL") {
-    const configRow = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections' OR id = 'bill_sections'");
-    const billSectionsConfig = configRow && configRow.value ? JSON.parse(configRow.value) : {};
+    const billSectionsConfig = await getEffectiveBillSections(db);
 
     const splits = await db.all("SELECT * FROM order_bill_splits WHERE order_id = ? ORDER BY bill_number ASC", [orderId]);
     const billPayloads = [];

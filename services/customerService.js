@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { addOrderItems } from "./adminService.js";
+import { addOrderItems, getEffectiveBillSections } from "./adminService.js";
 import { getCustomerTables, invalidateTableCache } from "./tableCache.js";
 import { calculateAuthoritativeBill } from "./billCalculationService.js";
 
@@ -569,10 +569,7 @@ async function requestBill(db, orderId) {
       }));
 
       // Load billSectionsConfig — the authoritative Food/Liquor classification map.
-      const configRow = await tx.get(
-        "SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections' OR id = 'bill_sections' LIMIT 1"
-      );
-      const billSectionsConfig = configRow && configRow.value ? JSON.parse(configRow.value) : {};
+      const billSectionsConfig = await getEffectiveBillSections(tx);
 
       // Run the authoritative engine — NEVER trusts orders.total or orders.final_total.
       const normalizedOrder = {

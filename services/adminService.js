@@ -1836,10 +1836,35 @@ export async function setKotSections(db, config) {
   return config;
 }
 
-export async function getBillSections(db) {
+export async function getEffectiveBillSections(db) {
   if (!isSqliteDb(db)) return {};
-  const row = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections'");
-  return row && row.value ? JSON.parse(row.value) : {};
+  let billSectionsConfig = {};
+  try {
+    const row = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections' OR id = 'bill_sections' LIMIT 1");
+    if (row && row.value) {
+      billSectionsConfig = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+    }
+  } catch (_) {
+    billSectionsConfig = {};
+  }
+
+  // Ensure all categories default to "Food" if not assigned (as documented in Settings UI)
+  try {
+    const cats = await db.all("SELECT id, name FROM categories");
+    if (cats && Array.isArray(cats)) {
+      for (const c of cats) {
+        if (billSectionsConfig[c.id] === undefined) {
+          billSectionsConfig[c.id] = "Food";
+        }
+      }
+    }
+  } catch (_) {}
+
+  return billSectionsConfig;
+}
+
+export async function getBillSections(db) {
+  return await getEffectiveBillSections(db);
 }
 
 export async function setBillSections(db, config) {
@@ -1937,19 +1962,7 @@ export async function billPreview(db, orderId) {
       categoryId: row.category_id || row.mi_category_id || "",
     }));
 
-    const configRow = await tx.get(
-      "SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections' OR id = 'bill_sections' LIMIT 1"
-    );
-    let billSectionsConfig = {};
-    if (configRow && configRow.value) {
-      try {
-        billSectionsConfig = typeof configRow.value === "string"
-          ? JSON.parse(configRow.value)
-          : configRow.value;
-      } catch (_) {
-        billSectionsConfig = {};
-      }
-    }
+    const billSectionsConfig = await getEffectiveBillSections(tx);
 
     const normalizedOrder = {
       id: order.id,
