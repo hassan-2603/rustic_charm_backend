@@ -96,6 +96,23 @@ function resolveItemSection(item, billSectionsConfig) {
           return normalizeSection(section, item);
         }
       }
+
+      // 3b. Slug matching (e.g. catName "Soups" -> config key "cat-soups")
+      const slug = "cat-" + lowerCat.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      if (config[slug] !== undefined) {
+        return normalizeSection(config[slug], item);
+      }
+
+      // 3c. Normalized alphanumeric match (e.g. "fries-&-sides" vs "Fries & Sides")
+      const cleanCat = lowerCat.replace(/^cat-/, "").replace(/[^a-z0-9]/g, "");
+      if (cleanCat) {
+        for (const [key, section] of Object.entries(config)) {
+          const cleanKey = extractCategoryString(key).toLowerCase().replace(/^cat-/, "").replace(/[^a-z0-9]/g, "");
+          if (cleanKey && cleanKey === cleanCat) {
+            return normalizeSection(section, item);
+          }
+        }
+      }
     }
 
     // 4. Direct match by menu item ID if mapped in config

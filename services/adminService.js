@@ -87,16 +87,44 @@ async function resolveCategoryInfo(db, categoryOrId) {
   }
 
   if (isSqliteDb(db)) {
-    // Try by exact id first
+    // 1. Try by exact id first
     const byId = await db.get("SELECT id, name FROM categories WHERE id = ? LIMIT 1", [lookupName]);
     if (byId?.id) return { id: byId.id, name: byId.name };
 
-    // Try by name (case-insensitive)
-    const byName = await db.get(
-      "SELECT id, name FROM categories WHERE LOWER(name) = LOWER(?) LIMIT 1",
-      [lookupName]
-    );
-    if (byName?.id) return { id: byName.id, name: byName.name };
+    // 2. Try slug ID (e.g. "Soups" -> "cat-soups")
+    const slugId = "cat-" + lookupName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const bySlug = await db.get("SELECT id, name FROM categories WHERE id = ? LIMIT 1", [slugId]);
+    if (bySlug?.id) return { id: bySlug.id, name: bySlug.name };
+
+    // 3. Match against categories table by parsing localized JSON names and slug variations
+    const allCats = await db.all("SELECT id, name FROM categories");
+    const target = lookupName.toLowerCase().trim();
+    const cleanTarget = target.replace(/^cat-/, "").replace(/[^a-z0-9]/g, "");
+
+    for (const c of allCats) {
+      if (c.id.toLowerCase() === target) return { id: c.id, name: c.name };
+      const cleanCId = c.id.toLowerCase().replace(/^cat-/, "").replace(/[^a-z0-9]/g, "");
+      if (cleanCId && cleanTarget && cleanCId === cleanTarget) {
+        return { id: c.id, name: c.name };
+      }
+
+      try {
+        const parsed = JSON.parse(c.name);
+        for (const val of Object.values(parsed)) {
+          if (typeof val === "string") {
+            const vLow = val.toLowerCase().trim();
+            if (vLow === target || (cleanTarget && vLow.replace(/[^a-z0-9]/g, "") === cleanTarget)) {
+              return { id: c.id, name: c.name };
+            }
+          }
+        }
+      } catch {
+        const cLow = c.name.toLowerCase().trim();
+        if (cLow === target || (cleanTarget && cLow.replace(/[^a-z0-9]/g, "") === cleanTarget)) {
+          return { id: c.id, name: c.name };
+        }
+      }
+    }
 
     // Not found — return null id but keep the plain name as fallback
     return { id: null, name: lookupName };
@@ -725,10 +753,12 @@ export async function getOrders(db, { includeCompleted = false, forReports = fal
     const itemsRows = await db.all(
       `SELECT
           oi.*,
-          c.name AS category_name,
-          c.id AS category_id
+          COALESCE(c.name, mi.category_name, '') AS category_name,
+          COALESCE(c.id, mi.category_id, '')     AS category_id,
+          mi.category_name                       AS mi_category_name,
+          mi.category_id                         AS mi_category_id
        FROM order_items oi
-       LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+       LEFT JOIN menu_items mi ON (oi.menu_item_id = mi.id OR (oi.menu_item_id IS NULL AND LOWER(TRIM(oi.name)) = LOWER(TRIM(mi.name))))
        LEFT JOIN categories c ON mi.category_id = c.id
        WHERE oi.order_id IN (${placeholders})
        ORDER BY oi.created_at ASC`,
@@ -737,11 +767,16 @@ export async function getOrders(db, { includeCompleted = false, forReports = fal
 
     const itemsByOrderId = new Map();
     for (const item of itemsRows) {
+      const resolvedItem = {
+        ...item,
+        category: item.category_name || item.mi_category_name || "",
+        categoryId: item.category_id || item.mi_category_id || "",
+      };
       const list = itemsByOrderId.get(item.order_id);
       if (list) {
-        list.push(item);
+        list.push(resolvedItem);
       } else {
-        itemsByOrderId.set(item.order_id, [item]);
+        itemsByOrderId.set(item.order_id, [resolvedItem]);
       }
     }
 
@@ -1161,9 +1196,13 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
       }
 
       const allItems = await tx.all(
-        `SELECT order_items.quantity, order_items.price, categories.name AS category_name, categories.id AS category_id
+        `SELECT order_items.quantity, order_items.price,
+                COALESCE(categories.name, menu_items.category_name, '') AS category_name,
+                COALESCE(categories.id, menu_items.category_id, '')     AS category_id,
+                menu_items.category_name                                AS mi_category_name,
+                menu_items.category_id                                  AS mi_category_id
          FROM order_items
-         LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+         LEFT JOIN menu_items ON (order_items.menu_item_id = menu_items.id OR (order_items.menu_item_id IS NULL AND LOWER(TRIM(order_items.name)) = LOWER(TRIM(menu_items.name))))
          LEFT JOIN categories ON menu_items.category_id = categories.id
          WHERE order_items.order_id = ?`,
         [id]
@@ -1181,9 +1220,13 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
     });
 
     const items = await db.all(
-      `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
+      `SELECT order_items.*,
+              COALESCE(categories.name, menu_items.category_name, '') AS category_name,
+              COALESCE(categories.id, menu_items.category_id, '')     AS category_id,
+              menu_items.category_name                                AS mi_category_name,
+              menu_items.category_id                                  AS mi_category_id
        FROM order_items
-       LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+       LEFT JOIN menu_items ON (order_items.menu_item_id = menu_items.id OR (order_items.menu_item_id IS NULL AND LOWER(TRIM(order_items.name)) = LOWER(TRIM(menu_items.name))))
        LEFT JOIN categories ON menu_items.category_id = categories.id
        WHERE order_items.order_id = ?
        ORDER BY order_items.created_at ASC`,
@@ -1291,15 +1334,19 @@ export async function removeOrderItems(db, id, itemIds) {
       }
 
       const remaining = await tx.all(
-        `SELECT order_items.quantity, order_items.price, categories.name AS category_name, categories.id AS category_id
+        `SELECT order_items.quantity, order_items.price,
+                COALESCE(categories.name, menu_items.category_name, '') AS category_name,
+                COALESCE(categories.id, menu_items.category_id, '')     AS category_id,
+                menu_items.category_name                                AS mi_category_name,
+                menu_items.category_id                                  AS mi_category_id
          FROM order_items
-         LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+         LEFT JOIN menu_items ON (order_items.menu_item_id = menu_items.id OR (order_items.menu_item_id IS NULL AND LOWER(TRIM(order_items.name)) = LOWER(TRIM(menu_items.name))))
          LEFT JOIN categories ON menu_items.category_id = categories.id
          WHERE order_items.order_id = ?`,
         [id]
       );
       if (remaining.length === 0) {
-        throw new Error("Cannot remove every item from an order \u2014 cancel the order instead if it's no longer needed.");
+        throw new Error("Cannot remove every item from an order — cancel the order instead if it's no longer needed.");
       }
 
       const totalsUpdates = recalculateOrderTotals(currentOrder, remaining);
@@ -1312,9 +1359,13 @@ export async function removeOrderItems(db, id, itemIds) {
     });
 
     const items = await db.all(
-      `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
+      `SELECT order_items.*,
+              COALESCE(categories.name, menu_items.category_name, '') AS category_name,
+              COALESCE(categories.id, menu_items.category_id, '')     AS category_id,
+              menu_items.category_name                                AS mi_category_name,
+              menu_items.category_id                                  AS mi_category_id
        FROM order_items
-       LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+       LEFT JOIN menu_items ON (order_items.menu_item_id = menu_items.id OR (order_items.menu_item_id IS NULL AND LOWER(TRIM(order_items.name)) = LOWER(TRIM(menu_items.name))))
        LEFT JOIN categories ON menu_items.category_id = categories.id
        WHERE order_items.order_id = ?
        ORDER BY order_items.created_at ASC`,
@@ -1336,9 +1387,8 @@ export async function removeOrderItems(db, id, itemIds) {
         id: item.id,
         menuItemId: item.menu_item_id,
         name: item.name,
-        category: item.category_name || "",
-        categoryId: item.category_id || "",
-        categoryId: item.category_id || "",
+        category: item.category_name || item.mi_category_name || "",
+        categoryId: item.category_id || item.mi_category_id || "",
         quantity: Number(item.quantity || 0),
         price: Number(item.price || 0),
         specialInstructions: item.special_instructions || "",
@@ -1427,9 +1477,13 @@ export async function updateOrderItemPrices(db, id, updates) {
       }
 
       const allItems = await tx.all(
-        `SELECT order_items.quantity, order_items.price, categories.name AS category_name, categories.id AS category_id
+        `SELECT order_items.quantity, order_items.price,
+                COALESCE(categories.name, menu_items.category_name, '') AS category_name,
+                COALESCE(categories.id, menu_items.category_id, '')     AS category_id,
+                menu_items.category_name                                AS mi_category_name,
+                menu_items.category_id                                  AS mi_category_id
          FROM order_items
-         LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+         LEFT JOIN menu_items ON (order_items.menu_item_id = menu_items.id OR (order_items.menu_item_id IS NULL AND LOWER(TRIM(order_items.name)) = LOWER(TRIM(menu_items.name))))
          LEFT JOIN categories ON menu_items.category_id = categories.id
          WHERE order_items.order_id = ?`,
         [id]
@@ -1444,9 +1498,13 @@ export async function updateOrderItemPrices(db, id, updates) {
     });
 
     const items = await db.all(
-      `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
+      `SELECT order_items.*,
+              COALESCE(categories.name, menu_items.category_name, '') AS category_name,
+              COALESCE(categories.id, menu_items.category_id, '')     AS category_id,
+              menu_items.category_name                                AS mi_category_name,
+              menu_items.category_id                                  AS mi_category_id
        FROM order_items
-       LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+       LEFT JOIN menu_items ON (order_items.menu_item_id = menu_items.id OR (order_items.menu_item_id IS NULL AND LOWER(TRIM(order_items.name)) = LOWER(TRIM(menu_items.name))))
        LEFT JOIN categories ON menu_items.category_id = categories.id
        WHERE order_items.order_id = ?
        ORDER BY order_items.created_at ASC`,
@@ -1466,8 +1524,8 @@ export async function updateOrderItemPrices(db, id, updates) {
         id: item.id,
         menuItemId: item.menu_item_id,
         name: item.name,
-        category: item.category_name || "",
-        categoryId: item.category_id || "",
+        category: item.category_name || item.mi_category_name || "",
+        categoryId: item.category_id || item.mi_category_id || "",
         quantity: Number(item.quantity || 0),
         price: Number(item.price || 0),
         specialInstructions: item.special_instructions || "",
@@ -1850,10 +1908,12 @@ export async function billPreview(db, orderId) {
 
     const rawItems = await tx.all(
       `SELECT oi.id, oi.menu_item_id, oi.name, oi.quantity, oi.price,
-              c.name  AS category_name,
-              c.id    AS category_id
+              COALESCE(c.name, mi.category_name, '') AS category_name,
+              COALESCE(c.id, mi.category_id, '')     AS category_id,
+              mi.category_name                       AS mi_category_name,
+              mi.category_id                         AS mi_category_id
        FROM order_items oi
-       LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+       LEFT JOIN menu_items mi ON (oi.menu_item_id = mi.id OR (oi.menu_item_id IS NULL AND LOWER(TRIM(oi.name)) = LOWER(TRIM(mi.name))))
        LEFT JOIN categories  c  ON mi.category_id  = c.id
        WHERE oi.order_id = ?
        ORDER BY oi.created_at ASC`,
@@ -1873,8 +1933,8 @@ export async function billPreview(db, orderId) {
       name: row.name || "",
       quantity: Number(row.quantity || 0),
       price: Number(row.price || 0),
-      category: row.category_name || "",
-      categoryId: row.category_id || "",
+      category: row.category_name || row.mi_category_name || "",
+      categoryId: row.category_id || row.mi_category_id || "",
     }));
 
     const configRow = await tx.get(
@@ -1923,4 +1983,27 @@ export async function billPreview(db, orderId) {
   });
 }
 
+/**
+ * Self-heals any menu_items that have category_id NULL or empty by resolving against categories.
+ */
+export async function healUnlinkedMenuItems(db) {
+  if (!isSqliteDb(db)) return;
+  try {
+    const unlinked = await db.all(
+      "SELECT id, name, category_name FROM menu_items WHERE category_id IS NULL OR category_id = '' LIMIT 200"
+    );
+    if (!unlinked || unlinked.length === 0) return;
+
+    for (const item of unlinked) {
+      const catInfo = await resolveCategoryInfo(db, item.category_name || item.name);
+      if (catInfo && catInfo.id) {
+        await db.run("UPDATE menu_items SET category_id = ? WHERE id = ?", [catInfo.id, item.id]);
+      }
+    }
+  } catch (e) {
+    console.warn("[healUnlinkedMenuItems] Warning during self-healing:", e.message);
+  }
+}
+
 export { invalidateMenuCache, initMenuVersion, getCurrentMenuVersion };
+

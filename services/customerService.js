@@ -539,10 +539,12 @@ async function requestBill(db, orderId) {
       // Read order_items inside the same transaction for a consistent snapshot.
       const rawItems = await tx.all(
         `SELECT oi.id, oi.menu_item_id, oi.name, oi.quantity, oi.price,
-                c.name  AS category_name,
-                c.id    AS category_id
+                COALESCE(c.name, mi.category_name, '') AS category_name,
+                COALESCE(c.id, mi.category_id, '')     AS category_id,
+                mi.category_name                       AS mi_category_name,
+                mi.category_id                         AS mi_category_id
          FROM order_items oi
-         LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+         LEFT JOIN menu_items mi ON (oi.menu_item_id = mi.id OR (oi.menu_item_id IS NULL AND LOWER(TRIM(oi.name)) = LOWER(TRIM(mi.name))))
          LEFT JOIN categories  c  ON mi.category_id  = c.id
          WHERE oi.order_id = ?
          ORDER BY oi.created_at ASC`,
@@ -562,8 +564,8 @@ async function requestBill(db, orderId) {
         name: row.name || "",
         quantity: Number(row.quantity || 0),
         price: Number(row.price || 0),
-        category: row.category_name || "",
-        categoryId: row.category_id || "",
+        category: row.category_name || row.mi_category_name || "",
+        categoryId: row.category_id || row.mi_category_id || "",
       }));
 
       // Load billSectionsConfig — the authoritative Food/Liquor classification map.

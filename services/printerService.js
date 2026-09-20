@@ -146,9 +146,13 @@ async function getOrderForPrint(db, orderId) {
   const order = await db.get("SELECT * FROM orders WHERE id = ?", [orderId]);
   if (!order) throw Object.assign(new Error("Order not found"), { status: 404 });
   const items = await db.all(
-    `SELECT order_items.*, categories.name AS category_name, categories.id AS category_id
+    `SELECT order_items.*,
+            COALESCE(categories.name, menu_items.category_name, '') AS category_name,
+            COALESCE(categories.id, menu_items.category_id, '')     AS category_id,
+            menu_items.category_name                                AS mi_category_name,
+            menu_items.category_id                                  AS mi_category_id
        FROM order_items
-       LEFT JOIN menu_items ON order_items.menu_item_id = menu_items.id
+       LEFT JOIN menu_items ON (order_items.menu_item_id = menu_items.id OR (order_items.menu_item_id IS NULL AND LOWER(TRIM(order_items.name)) = LOWER(TRIM(menu_items.name))))
        LEFT JOIN categories ON menu_items.category_id = categories.id
        WHERE order_items.order_id = ?
        ORDER BY order_items.created_at ASC`,
@@ -157,9 +161,10 @@ async function getOrderForPrint(db, orderId) {
 
   const mappedItems = items.map((item) => ({
     id: item.id,
+    menuItemId: item.menu_item_id || "",
     name: item.name,
-    category: item.category_name || "",
-    categoryId: item.category_id || "",
+    category: item.category_name || item.mi_category_name || "",
+    categoryId: item.category_id || item.mi_category_id || "",
     quantity: Number(item.quantity || 0),
     price: Number(item.price || 0),
   }));
@@ -207,8 +212,22 @@ function resolveSection(item, config = {}) {
 
   // 2. Direct configuration by category Name
   if (catName) {
+    if (config[catName]) return config[catName];
     for (const [key, section] of Object.entries(config)) {
       if (getCategoryText(key).trim().toLowerCase() === catName) return section;
+    }
+
+    // 2b. Slug matching (e.g. catName "Soups" -> config key "cat-soups")
+    const slug = "cat-" + catName.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    if (config[slug]) return config[slug];
+
+    // 2c. Normalized alphanumeric match
+    const cleanCatName = catName.replace(/^cat-/, "").replace(/[^a-z0-9]/g, "");
+    if (cleanCatName) {
+      for (const [key, section] of Object.entries(config)) {
+        const cleanKey = getCategoryText(key).trim().toLowerCase().replace(/^cat-/, "").replace(/[^a-z0-9]/g, "");
+        if (cleanKey && cleanKey === cleanCatName) return section;
+      }
     }
   }
 
