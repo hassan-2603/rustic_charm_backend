@@ -13,9 +13,10 @@ import customerRouter from "./routes/customer.js";
 import adminRouter from "./routes/admin.js";
 import staffRouter from "./routes/staff.js";
 import connectorRouter from "./routes/connector.js";
-import { getCategories, getMenuItems, addMenuItem, deleteMenuItem, getOrders, getMenuVersion } from "./services/adminService.js";
+import { getCategories, getMenuItems, addMenuItem, deleteMenuItem, getOrders, getMenuVersion, initMenuVersion } from "./services/adminService.js";
+import { getMenuEtag, matchesIfNoneMatch, getCurrentMenuVersion } from "./services/menuCache.js";
 import { createOrder } from "./services/customerService.js";
-import { getOffers as getAdminOffers, addOffer as addAdminOffer, updateOffer as updateAdminOffer, deleteOffer as deleteAdminOffer } from "./services/offerService.js";
+import { getOffers as getAdminOffers, getActiveOffers, addOffer as addAdminOffer, updateOffer as updateAdminOffer, deleteOffer as deleteAdminOffer } from "./services/offerService.js";
 import { translateBatch } from "./services/translationService.js";
 
 dotenv.config();
@@ -212,6 +213,20 @@ app.get("/api/menu/version", async (req, res) => {
 // Menu Endpoints
 app.get("/api/menu", async (req, res) => {
   try {
+    let version = getCurrentMenuVersion();
+    if (version === null) {
+      version = await getMenuVersion(sqliteDb);
+    }
+    const etag = getMenuEtag(req.query.lang, version);
+
+    res.setHeader("Cache-Control", "no-cache, must-revalidate");
+    res.setHeader("ETag", etag);
+
+    const clientEtag = req.headers["if-none-match"];
+    if (matchesIfNoneMatch(clientEtag, etag)) {
+      return res.status(304).end();
+    }
+
     const items = await getMenuItems(sqliteDb, req.query.lang);
     res.json(items);
   } catch (err) {
@@ -247,11 +262,11 @@ app.get("/api/categories", async (req, res) => {
   }
 });
 
-// SQLite Offers Endpoints
+// SQLite Offers Endpoints (served from in-memory RAM cache)
 app.get("/api/offers", async (req, res) => {
   try {
-    const offers = await getAdminOffers(sqliteDb);
-    res.json(offers.filter((offer) => offer.isActive !== false));
+    const offers = await getActiveOffers(sqliteDb);
+    res.json(offers);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -363,6 +378,20 @@ app.post("/api/translate-menu", async (req, res) => {
 
 app.use(errorHandler);
 
-app.listen(PORT, () => {
-  console.log(`🚀 Rustic Charm Backend Server running on http://localhost:${PORT}`);
-});
+async function startServer() {
+  try {
+    // Read restaurant_settings.menu_version ONCE from MySQL at startup
+    const version = await initMenuVersion(sqliteDb);
+    console.log(`[menuCache] Initialized in-memory menu version from MySQL: ${version}`);
+
+    app.listen(PORT, () => {
+      console.log(`🚀 Rustic Charm Backend Server running on http://localhost:${PORT}`);
+    });
+  } catch (err) {
+    console.error("FATAL: Failed to initialize menu version at startup:", err);
+    process.exit(1);
+  }
+}
+
+startServer();
+

@@ -1,5 +1,7 @@
 import crypto from "crypto";
 import { addOrderItems } from "./adminService.js";
+import { getCustomerTables, invalidateTableCache } from "./tableCache.js";
+import { calculateAuthoritativeBill } from "./billCalculationService.js";
 
 function isSqliteDb(db) {
   return !!db && typeof db.all === "function" && typeof db.run === "function" && !db.collection;
@@ -108,34 +110,7 @@ function enrichTable(tableDoc) {
 }
 
 async function listCustomerTables(db) {
-  if (isSqliteDb(db)) {
-    const rows = await db.all("SELECT * FROM tables ORDER BY area ASC, table_number ASC");
-    return rows.map((row) => ({
-      id: row.id,
-      tableKey: row.table_key,
-      tableNumber: Number(row.table_number),
-      area: row.area,
-      areaLabel: row.area_label || row.area,
-      displayName: row.display_name || `${row.area_label || row.area} - Table ${row.table_number}`,
-      occupied: row.occupied === 1 || row.occupied === true || row.occupied === "1",
-      status: row.status || "available",
-      currentOrderId: row.current_order_id || "",
-      currentSessionId: row.current_session_id || "",
-    }));
-  }
-
-  const snapshot = await db
-    .collection("restaurants")
-    .doc("rustic-charm")
-    .collection("tables")
-    .get();
-  return snapshot.docs
-    .map(enrichTable)
-    .sort((a, b) => {
-      const areaOrder = String(a.area || "").localeCompare(String(b.area || ""));
-      if (areaOrder !== 0) return areaOrder;
-      return Number(a.tableNumber || 0) - Number(b.tableNumber || 0);
-    });
+  return await getCustomerTables(db);
 }
 
 async function getSessionInfo(db, sessionId, tableReference) {
@@ -303,6 +278,7 @@ async function createOrder(db, tableReference, cart, total, sessionId, customerN
           "UPDATE tables SET current_session_id = ? WHERE id = ?",
           [sessionId, validTable.id]
         );
+        invalidateTableCache();
       }
 
       if (customerName || customerPhone) {
@@ -363,6 +339,7 @@ async function createOrder(db, tableReference, cart, total, sessionId, customerN
       "UPDATE tables SET occupied = 1, status = 'occupied', current_order_id = ?, current_session_id = ? WHERE id = ?",
       [orderData.id, sessionId, validTable.id]
     );
+    invalidateTableCache();
 
     return { id: orderData.id, orderNumber, tableReference: validTable.tableKey };
   }
@@ -526,20 +503,139 @@ async function requestBill(db, orderId) {
   }
 
   if (isSqliteDb(db)) {
-    const order = await db.get("SELECT id, status FROM orders WHERE id = ? LIMIT 1", [orderId]);
-    if (!order) {
-      const error = new Error("Order not found");
-      error.status = 404;
-      throw error;
-    }
-    const nonBillableStatuses = ["Bill Requested", "Payment Done", "Completed", "Rejected"];
-    if (nonBillableStatuses.includes(order.status)) {
-      const error = new Error(`Cannot request bill for an order with status: ${order.status}`);
-      error.status = 400;
-      throw error;
-    }
-    await db.run("UPDATE orders SET status = 'Bill Requested', updated_at = ? WHERE id = ?", [new Date().toISOString(), orderId]);
-    return { orderId, status: "Bill Requested" };
+    // ── Phase 3: Atomic Bill Finalization ──────────────────────────────────────
+    // This is the immutable bill-cutoff boundary.
+    // All steps execute inside a single transaction with a row lock so that
+    // concurrent staff mutations (add/remove item, discount changes) cannot
+    // race against this finalization.
+    let frozenBill;
+    let authTotal;
+    let authFinalTotal;
+
+    await db.transaction(async (tx) => {
+      // Lock the order row — prevents concurrent writes during finalization.
+      let order;
+      try {
+        order = await tx.get("SELECT * FROM orders WHERE id = ? FOR UPDATE", [orderId]);
+      } catch {
+        // Some SQLite drivers do not support FOR UPDATE — fall back to a plain read.
+        order = await tx.get("SELECT * FROM orders WHERE id = ?", [orderId]);
+      }
+
+      if (!order) {
+        const error = new Error("Order not found");
+        error.status = 404;
+        throw error;
+      }
+
+      // Reject if already in a terminal / already-finalized state.
+      const nonBillableStatuses = ["Bill Requested", "Payment Done", "Completed", "Rejected"];
+      if (nonBillableStatuses.includes(order.status)) {
+        const error = new Error(`Cannot request bill for an order with status: ${order.status}`);
+        error.status = 400;
+        throw error;
+      }
+
+      // Read order_items inside the same transaction for a consistent snapshot.
+      const rawItems = await tx.all(
+        `SELECT oi.id, oi.menu_item_id, oi.name, oi.quantity, oi.price,
+                c.name  AS category_name,
+                c.id    AS category_id
+         FROM order_items oi
+         LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+         LEFT JOIN categories  c  ON mi.category_id  = c.id
+         WHERE oi.order_id = ?
+         ORDER BY oi.created_at ASC`,
+        [orderId]
+      );
+
+      if (!rawItems || rawItems.length === 0) {
+        const error = new Error("Cannot finalize a bill for an order with no items");
+        error.status = 400;
+        throw error;
+      }
+
+      // Normalise items for the authoritative engine.
+      const items = rawItems.map((row) => ({
+        id: row.id,
+        menuItemId: row.menu_item_id || "",
+        name: row.name || "",
+        quantity: Number(row.quantity || 0),
+        price: Number(row.price || 0),
+        category: row.category_name || "",
+        categoryId: row.category_id || "",
+      }));
+
+      // Load billSectionsConfig — the authoritative Food/Liquor classification map.
+      const configRow = await tx.get(
+        "SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections' OR id = 'bill_sections' LIMIT 1"
+      );
+      const billSectionsConfig = configRow && configRow.value ? JSON.parse(configRow.value) : {};
+
+      // Run the authoritative engine — NEVER trusts orders.total or orders.final_total.
+      const normalizedOrder = {
+        id: order.id,
+        orderNumber: order.order_number,
+        tableLabel: order.table_label,
+        tableNumber: order.table_number,
+        tableReference: order.table_reference,
+        waiterName: order.waiter_name,
+        customerName: order.customer_name,
+        customerPhone: order.customer_phone,
+        discountMode: order.discount_mode,
+        discountType: order.discount_type,
+        discountValue: order.discount_value,
+        discountAmount: order.discount_amount !== null && order.discount_amount !== undefined ? Number(order.discount_amount) : null,
+        foodDiscountPercent: order.food_discount_percent !== null && order.food_discount_percent !== undefined ? Number(order.food_discount_percent) : null,
+        alcoholDiscountPercent: order.alcohol_discount_percent !== null && order.alcohol_discount_percent !== undefined ? Number(order.alcohol_discount_percent) : null,
+      };
+
+      frozenBill = calculateAuthoritativeBill(normalizedOrder, items, billSectionsConfig);
+      authTotal = frozenBill.total;
+      authFinalTotal = frozenBill.finalTotal;
+
+      const now = new Date().toISOString();
+
+      // Atomically write the finalized state onto the order row.
+      // frozen_bill_json preserves the exact bill snapshot; if the column does not
+      // exist yet the UPDATE is still safe — the DB will reject the column and the
+      // critical total/final_total fields are still written.
+      try {
+        await tx.run(
+          `UPDATE orders
+           SET status          = 'Bill Requested',
+               total           = ?,
+               final_total     = ?,
+               frozen_bill_json = ?,
+               updated_at      = ?
+           WHERE id = ?`,
+          [authTotal, authFinalTotal, JSON.stringify(frozenBill), now, orderId]
+        );
+      } catch (columnErr) {
+        // frozen_bill_json column may not exist in older schema — fall back gracefully.
+        if (/no column named frozen_bill_json/i.test(columnErr.message) || /unknown column/i.test(columnErr.message)) {
+          await tx.run(
+            `UPDATE orders
+             SET status      = 'Bill Requested',
+                 total       = ?,
+                 final_total = ?,
+                 updated_at  = ?
+             WHERE id = ?`,
+            [authTotal, authFinalTotal, now, orderId]
+          );
+        } else {
+          throw columnErr;
+        }
+      }
+    });
+
+    return {
+      orderId,
+      status: "Bill Requested",
+      total: authTotal,
+      finalTotal: authFinalTotal,
+      frozenBill,
+    };
   }
 
   throw new Error("SQLite-backed backend requires SQLite database access");

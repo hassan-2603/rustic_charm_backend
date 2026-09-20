@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { calculateAuthoritativeBill } from "./billCalculationService.js";
 
 // A printer is considered OFFLINE if the connector hasn't polled for jobs
 // in this long. "Configured" (has an IP/name saved) is NOT the same as
@@ -230,62 +231,18 @@ function formatIndiaDateTime(dateInput) {
   });
 }
 
-function buildBillPayload(order, billSectionsConfig) {
-  const { foodItems, alcoholItems, foodTotal, alcoholTotal } = splitItemsByCategory(order.items, billSectionsConfig);
-  const toLine = (item) => ({
-    id: item.id,
-    name: item.name,
-    quantity: Number(item.quantity || 1),
-    price: Number(item.price || 0),
-    amount: Number(item.price || 0) * Number(item.quantity || 1),
-  });
-
-  // Strict dynamic total derived strictly from current items
-  const itemsTotal = foodTotal + alcoholTotal;
-  const isCategoryDiscount = order.discountMode === "category";
-
-  let foodDiscountAmount = 0;
-  let alcoholDiscountAmount = 0;
-  let discountAmount = 0;
-  let finalTotal = itemsTotal;
-
-  if (isCategoryDiscount) {
-    const foodPercent = Math.max(0, Number(order.foodDiscountPercent || 0));
-    const alcoholPercent = Math.max(0, Number(order.alcoholDiscountPercent || 0));
-    foodDiscountAmount = Math.round((foodTotal * foodPercent) / 100);
-    alcoholDiscountAmount = Math.round((alcoholTotal * alcoholPercent) / 100);
-    discountAmount = foodDiscountAmount + alcoholDiscountAmount;
-    finalTotal = Math.max(0, (foodTotal - foodDiscountAmount) + (alcoholTotal - alcoholDiscountAmount));
-  } else if (order.discountAmount > 0) {
-    discountAmount = Number(order.discountAmount || 0);
-    finalTotal = Math.max(0, itemsTotal - discountAmount);
-  } else if (order.finalTotal !== null && order.finalTotal !== undefined && Number(order.finalTotal) < itemsTotal && Number(order.finalTotal) > 0) {
-    discountAmount = Math.max(0, itemsTotal - Number(order.finalTotal));
-    finalTotal = Number(order.finalTotal);
-  }
+export function buildBillPayload(order, billSectionsConfig) {
+  // Authoritative bill calculation: single source of truth for all monetary values.
+  // FAIL CLOSED: Rejects invalid items, invalid discounts, or unresolvable sections.
+  // NEVER consults order.finalTotal or order.total.
+  const calculatedBill = calculateAuthoritativeBill(order, order.items, billSectionsConfig);
 
   return {
-    orderNumber: order.orderNumber,
-    tableNumber: order.tableLabel,
-    customerName: order.customerName,
-    customerPhone: order.customerPhone,
-    waiterName: order.waiterName,
-    date: formatIndiaDateTime(new Date()), // Exact time bill was printed
-    items: (order.items || []).map(toLine),
-    foodItems: foodItems.map(toLine),
-    alcoholItems: alcoholItems.map(toLine),
-    foodTotal,
-    alcoholTotal,
-    total: itemsTotal,
-    discountMode: order.discountMode || null,
-    discountAmount,
-    finalTotal,
-    foodDiscountPercent: isCategoryDiscount ? Number(order.foodDiscountPercent || 0) : 0,
-    alcoholDiscountPercent: isCategoryDiscount ? Number(order.alcoholDiscountPercent || 0) : 0,
-    foodDiscountAmount,
-    alcoholDiscountAmount,
+    ...calculatedBill,
+    date: formatIndiaDateTime(calculatedBill.calculatedAt),
   };
 }
+
 
 function buildKotPayload(order) {
   return {

@@ -1,4 +1,13 @@
 import crypto from "crypto";
+import { calculateAuthoritativeBill } from "./billCalculationService.js";
+import {
+  getOrLoadMenu,
+  invalidateMenuCache,
+  initMenuVersion,
+  getCurrentMenuVersion,
+  setCurrentMenuVersion,
+} from "./menuCache.js";
+import { getAdminTables, invalidateTableCache } from "./tableCache.js";
 
 const RESTAURANT_PATH = ["restaurants", "rustic-charm"];
 
@@ -53,7 +62,7 @@ function normalizeMenuText(value) {
       if (parsed && typeof parsed === "object") {
         return String(parsed.English || parsed.en || parsed.english || Object.values(parsed)[0] || "").trim();
       }
-    } catch {}
+    } catch { }
   }
   return str;
 }
@@ -224,7 +233,7 @@ export async function deleteCategory(db, id) {
   return { id };
 }
 
-export async function getMenuItems(db, lang) {
+export async function fetchMenuItemsFromDb(db, lang) {
   if (isSqliteDb(db)) {
     const rows = await db.all(
       `SELECT menu_items.*, categories.name AS cat_join_name
@@ -408,6 +417,13 @@ export async function getMenuItems(db, lang) {
   return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 }
 
+export async function getMenuItems(db, lang, options = {}) {
+  if (options && options.skipCache) {
+    return fetchMenuItemsFromDb(db, lang);
+  }
+  return getOrLoadMenu(db, lang, fetchMenuItemsFromDb);
+}
+
 export async function addMenuItem(db, item) {
   if (isSqliteDb(db)) {
     const id = item.id || crypto.randomUUID();
@@ -550,25 +566,7 @@ export async function deleteMenuItem(db, id) {
 }
 
 export async function getTables(db) {
-  if (isSqliteDb(db)) {
-    const rows = await db.all("SELECT * FROM tables ORDER BY table_number ASC");
-    return rows.map((row) => ({
-      id: row.id,
-      tableKey: row.table_key,
-      tableNumber: Number(row.table_number),
-      area: row.area,
-      areaLabel: row.area_label || row.area,
-      displayName: row.display_name || `${row.area_label || row.area} - Table ${row.table_number}`,
-      occupied: toBoolean(row.occupied),
-      status: row.status || "available",
-      currentOrderId: row.current_order_id || "",
-      currentSessionId: row.current_session_id || "",
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
-  }
-  const snapshot = await tablesCollection(db).get();
-  return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  return await getAdminTables(db);
 }
 
 export async function createTable(db, tableData) {
@@ -619,6 +617,7 @@ export async function createTable(db, tableData) {
       "INSERT INTO tables (id, table_key, table_number, area, area_label, display_name, occupied, status, current_order_id, current_session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [data.id, data.table_key, data.table_number, data.area, data.area_label, data.display_name, data.occupied, data.status, data.current_order_id, data.current_session_id, data.created_at, data.updated_at]
     );
+    invalidateTableCache();
     return { id: data.id, tableKey: data.table_key, tableNumber: data.table_number, area: data.area, areaLabel: data.area_label, displayName: data.display_name, occupied: false, status: "available" };
   }
 
@@ -639,6 +638,7 @@ export async function createTable(db, tableData) {
   };
 
   await tablesCollection(db).doc(tableKey).set(data, { merge: true });
+  invalidateTableCache();
   return data;
 }
 
@@ -679,9 +679,11 @@ export async function updateTable(db, id, updates) {
       );
     }
 
+    invalidateTableCache();
     return { id, ...updates };
   }
   await tablesCollection(db).doc(id).update(updates);
+  invalidateTableCache();
   return { id, ...updates };
 }
 
@@ -689,9 +691,11 @@ export async function deleteTable(db, id) {
   if (!id) throw new Error("Table ID is required");
   if (isSqliteDb(db)) {
     await db.run("DELETE FROM tables WHERE id = ?", [id]);
+    invalidateTableCache();
     return { id };
   }
   await tablesCollection(db).doc(id).delete();
+  invalidateTableCache();
   return { id };
 }
 
@@ -834,6 +838,7 @@ export async function createAdminOrder(db, order) {
     );
   }
   await db.run("UPDATE tables SET occupied = 1, status = 'occupied', current_order_id = ?, updated_at = ? WHERE id = ?", [id, now, table.id]);
+  invalidateTableCache();
   return { id, orderNumber };
 }
 
@@ -845,6 +850,7 @@ export async function deleteAllOrders(db) {
       "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ?",
       [new Date().toISOString()]
     );
+    invalidateTableCache();
     return { count: result.changes };
   }
   const snapshot = await ordersCollection(db).get();
@@ -880,6 +886,29 @@ export async function updateOrder(db, id, updates) {
     const currentOrder = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
     if (!currentOrder) throw new Error("Order not found");
 
+    // Phase 3: When the bill has been finalized (status = 'Bill Requested'), block
+    // any attempt by a client to overwrite the authoritative frozen financial fields.
+    // Staff are still allowed to advance the status to 'Payment Done' or 'Completed'.
+    if (currentOrder.status === "Bill Requested") {
+      const allowedStatusTransitions = new Set(["Payment Done", "Completed"]);
+      const requestedStatus = updates.status;
+      if (requestedStatus !== undefined && !allowedStatusTransitions.has(requestedStatus)) {
+        const err = new Error(
+          `Order ${currentOrder.order_number || id} is already in 'Bill Requested' state. ` +
+          `Status can only be advanced to 'Payment Done' or 'Completed'.`
+        );
+        err.status = 409;
+        throw err;
+      }
+      // Strip all financial override fields — the frozen values on the DB row are authoritative.
+      const financialFields = [
+        "total", "finalTotal", "discountAmount", "discountMode", "discountType",
+        "discountValue", "foodDiscountPercent", "alcoholDiscountPercent",
+        "foodDiscountAmount", "alcoholDiscountAmount",
+      ];
+      financialFields.forEach((f) => delete updates[f]);
+    }
+
     let table;
     if (updates.tableId !== undefined) {
       table = await db.get("SELECT * FROM tables WHERE id = ?", [updates.tableId]);
@@ -894,15 +923,15 @@ export async function updateOrder(db, id, updates) {
       updates.acceptedAt !== undefined
         ? updates.acceptedAt
         : (updates.status === "Accepted" || updates.status === "Preparing") && !currentOrder.accepted_at
-        ? now
-        : undefined;
+          ? now
+          : undefined;
 
     const autoCompletedAt =
       updates.completedAt !== undefined
         ? updates.completedAt
         : updates.status === "Completed" && !currentOrder.completed_at
-        ? now
-        : undefined;
+          ? now
+          : undefined;
 
     let waiterId = updates.waiterId !== undefined ? updates.waiterId : (updates.waiter?.id !== undefined ? updates.waiter.id : undefined);
     let waiterName = updates.waiterName !== undefined ? updates.waiterName : (updates.waiter?.name !== undefined ? updates.waiter.name : undefined);
@@ -1002,6 +1031,11 @@ export async function updateOrder(db, id, updates) {
         }
       }
     });
+
+    if (table || updates.status === 'Completed') {
+      invalidateTableCache();
+    }
+
     return {
       id,
       waiterId: updates.waiterId !== undefined ? updates.waiterId : currentOrder.waiter_id,
@@ -1009,17 +1043,17 @@ export async function updateOrder(db, id, updates) {
       ...updates,
       ...(table
         ? {
-            tableId: table.id,
-            tableReference: table.table_key,
-            tableNumber: table.table_number,
-            tableArea: table.area,
-            tableLabel: table.display_name,
-            table_id: table.id,
-            table_reference: table.table_key,
-            table_number: table.table_number,
-            table_area: table.area,
-            table_label: table.display_name,
-          }
+          tableId: table.id,
+          tableReference: table.table_key,
+          tableNumber: table.table_number,
+          tableArea: table.area,
+          tableLabel: table.display_name,
+          table_id: table.id,
+          table_reference: table.table_key,
+          table_number: table.table_number,
+          table_area: table.area,
+          table_label: table.display_name,
+        }
         : {}),
     };
   }
@@ -1086,6 +1120,16 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
         currentOrder = await tx.get("SELECT * FROM orders WHERE id = ?", [id]);
       }
       if (!currentOrder) throw new Error("Order not found");
+
+      // Phase 3: Reject item mutations after bill finalization.
+      if (currentOrder.status === "Bill Requested") {
+        const err = new Error(
+          `Order ${currentOrder.order_number || id} has been finalized ('Bill Requested'). ` +
+          `Items cannot be added after bill finalization.`
+        );
+        err.status = 409;
+        throw err;
+      }
 
       for (const item of itemsToAdd) {
         const menuItemId = item.menuItemId || null;
@@ -1219,6 +1263,16 @@ export async function removeOrderItems(db, id, itemIds) {
         currentOrder = await tx.get("SELECT * FROM orders WHERE id = ?", [id]);
       }
       if (!currentOrder) throw new Error("Order not found");
+
+      // Phase 3: Reject item mutations after bill finalization.
+      if (currentOrder.status === "Bill Requested") {
+        const err = new Error(
+          `Order ${currentOrder.order_number || id} has been finalized ('Bill Requested'). ` +
+          `Items cannot be removed after bill finalization.`
+        );
+        err.status = 409;
+        throw err;
+      }
 
       for (const item of itemIds) {
         const itemId = typeof item === 'string' ? item : item.id;
@@ -1354,6 +1408,16 @@ export async function updateOrderItemPrices(db, id, updates) {
       }
       if (!currentOrder) throw new Error("Order not found");
 
+      // Phase 3: Reject price mutations after bill finalization.
+      if (currentOrder.status === "Bill Requested") {
+        const err = new Error(
+          `Order ${currentOrder.order_number || id} has been finalized ('Bill Requested'). ` +
+          `Item prices cannot be changed after bill finalization.`
+        );
+        err.status = 409;
+        throw err;
+      }
+
       for (const update of updates) {
         if (!update.id || update.newPrice === undefined) continue;
         await tx.run(
@@ -1469,6 +1533,7 @@ export async function deleteOrder(db, id) {
         "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ?",
         [new Date().toISOString()]
       );
+      invalidateTableCache();
     }
 
     return { id };
@@ -1483,6 +1548,7 @@ export async function deleteOrder(db, id) {
     await tablesCollection(db)
       .doc(order.tableId)
       .set({ occupied: false, status: "available", currentOrderId: "", currentSessionId: "" }, { merge: true });
+    invalidateTableCache();
   }
 
   return { id };
@@ -1631,15 +1697,22 @@ export async function incrementMenuVersion(db) {
     "INSERT INTO restaurant_settings (id, `key`, value, updated_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
     [`menu-version-${Date.now()}`, "menu_version", String(nextValue), new Date().toISOString()]
   );
+  // Update in-memory menu version monotonically after successful DB commit
+  setCurrentMenuVersion(nextValue);
+  // Invalidate in-memory menu cache for all languages
+  invalidateMenuCache();
   return nextValue;
 }
 
 export async function getMenuVersion(db) {
+  const cached = getCurrentMenuVersion();
+  if (cached !== null && cached !== undefined) {
+    return cached;
+  }
   if (!isSqliteDb(db)) {
     throw new Error("SQLite-backed backend requires SQLite database access");
   }
-  const row = await db.get("SELECT value FROM restaurant_settings WHERE `key` = 'menu_version' LIMIT 1");
-  return row && row.value ? Number(row.value) : 1;
+  return await initMenuVersion(db);
 }
 
 
@@ -1744,3 +1817,110 @@ export async function markFeedbacksAsDownloaded(db, ids = []) {
   }
   return { success: true };
 }
+
+export async function billPreview(db, orderId) {
+  if (!orderId) {
+    const error = new Error("Order ID is required");
+    error.status = 400;
+    throw error;
+  }
+
+  const runInTx = typeof db.transaction === "function" ? (cb) => db.transaction(cb) : (cb) => cb(db);
+
+  return await runInTx(async (tx) => {
+    const order = await tx.get("SELECT * FROM orders WHERE id = ?", [orderId]);
+    if (!order) {
+      const error = new Error("Order not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (order.frozen_bill_json) {
+      try {
+        const parsed = typeof order.frozen_bill_json === "string"
+          ? JSON.parse(order.frozen_bill_json)
+          : order.frozen_bill_json;
+        if (parsed && typeof parsed === "object" && parsed.finalTotal !== undefined) {
+          return parsed;
+        }
+      } catch (_) {
+        // Fall back to live calculation if corrupted
+      }
+    }
+
+    const rawItems = await tx.all(
+      `SELECT oi.id, oi.menu_item_id, oi.name, oi.quantity, oi.price,
+              c.name  AS category_name,
+              c.id    AS category_id
+       FROM order_items oi
+       LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+       LEFT JOIN categories  c  ON mi.category_id  = c.id
+       WHERE oi.order_id = ?
+       ORDER BY oi.created_at ASC`,
+      [orderId]
+    );
+
+    if (!rawItems || rawItems.length === 0) {
+      const error = new Error("Cannot generate bill preview for an order with no items");
+      error.status = 400;
+      error.code = "no_items";
+      throw error;
+    }
+
+    const items = rawItems.map((row) => ({
+      id: row.id,
+      menuItemId: row.menu_item_id || "",
+      name: row.name || "",
+      quantity: Number(row.quantity || 0),
+      price: Number(row.price || 0),
+      category: row.category_name || "",
+      categoryId: row.category_id || "",
+    }));
+
+    const configRow = await tx.get(
+      "SELECT value FROM restaurant_settings WHERE `key` = 'bill_sections' OR id = 'bill_sections' LIMIT 1"
+    );
+    let billSectionsConfig = {};
+    if (configRow && configRow.value) {
+      try {
+        billSectionsConfig = typeof configRow.value === "string"
+          ? JSON.parse(configRow.value)
+          : configRow.value;
+      } catch (_) {
+        billSectionsConfig = {};
+      }
+    }
+
+    const normalizedOrder = {
+      id: order.id,
+      orderNumber: order.order_number,
+      tableLabel: order.table_label,
+      tableNumber: order.table_number,
+      tableReference: order.table_reference,
+      waiterName: order.waiter_name,
+      customerName: order.customer_name,
+      customerPhone: order.customer_phone,
+      discountMode: order.discount_mode,
+      discountType: order.discount_type,
+      discountValue: order.discount_value,
+      discountAmount: order.discount_amount !== null && order.discount_amount !== undefined
+        ? Number(order.discount_amount)
+        : null,
+      foodDiscountPercent: order.food_discount_percent !== null && order.food_discount_percent !== undefined
+        ? Number(order.food_discount_percent)
+        : null,
+      alcoholDiscountPercent: order.alcohol_discount_percent !== null && order.alcohol_discount_percent !== undefined
+        ? Number(order.alcohol_discount_percent)
+        : null,
+    };
+
+    try {
+      return calculateAuthoritativeBill(normalizedOrder, items, billSectionsConfig);
+    } catch (calcErr) {
+      calcErr.status = 400;
+      throw calcErr;
+    }
+  });
+}
+
+export { invalidateMenuCache, initMenuVersion, getCurrentMenuVersion };

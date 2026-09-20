@@ -15,6 +15,7 @@ import {
   getOrderSplits,
   createAdminOrder,
   getKitchenCredentials,
+  billPreview,
 } from "../services/adminService.js";
 import { createPrintJob, getPrintJob, retryPrintJob } from "../services/printerService.js";
 
@@ -86,6 +87,19 @@ router.get("/orders", async (req, res, next) => {
     res.json(buildApiResponse(orders));
   } catch (err) {
     next(buildApiError(err.message, 500));
+  }
+});
+
+router.get("/orders/:id/bill-preview", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Order ID is required" });
+    }
+    const preview = await billPreview(req.app.locals.db, id);
+    res.json(buildApiResponse(preview));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
   }
 });
 

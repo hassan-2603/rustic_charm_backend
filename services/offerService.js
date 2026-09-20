@@ -1,3 +1,11 @@
+import crypto from "crypto";
+import {
+  getOrLoadOffers,
+  invalidateOffersCache,
+  getCachedOffers,
+  getOffersCacheStats,
+} from "./offersCache.js";
+
 function isSqliteDb(db) {
   return !!db && typeof db.all === "function" && typeof db.run === "function" && !db.collection;
 }
@@ -6,7 +14,10 @@ function offersCollection(db) {
   return db.collection("restaurants").doc("rustic-charm").collection("offers");
 }
 
-export async function getOffers(db) {
+/**
+ * Direct database loader for all offers.
+ */
+export async function fetchOffersFromDb(db) {
   if (!db) throw new Error("Database not initialized");
 
   if (isSqliteDb(db)) {
@@ -31,6 +42,29 @@ export async function getOffers(db) {
   }));
 }
 
+/**
+ * Customer-facing active offers with in-memory caching and request coalescing.
+ * Returns only active offers (isActive !== false), matching the exact API contract.
+ */
+export async function getActiveOffers(db, options = {}) {
+  if (options && options.skipCache) {
+    const all = await fetchOffersFromDb(db);
+    return all.filter((offer) => offer.isActive !== false);
+  }
+
+  return getOrLoadOffers(db, async (dbConn) => {
+    const all = await fetchOffersFromDb(dbConn);
+    return all.filter((offer) => offer.isActive !== false);
+  });
+}
+
+/**
+ * Returns all offers (active and inactive), preserving backward compatibility for admin.
+ */
+export async function getOffers(db) {
+  return fetchOffersFromDb(db);
+}
+
 export async function addOffer(db, offer) {
   if (!db) throw new Error("Database not initialized");
   if (!offer || !offer.title) throw new Error("Offer title is required");
@@ -53,6 +87,9 @@ export async function addOffer(db, offer) {
       [data.id, data.title, data.description, data.code, data.discount_tag, data.is_active, data.created_at, data.updated_at]
     );
 
+    // Invalidate customer offers cache after successful DB commit
+    invalidateOffersCache();
+
     return { ...data, discountTag: data.discount_tag, isActive: data.is_active === 1, createdAt: data.created_at, updatedAt: data.updated_at };
   }
 
@@ -66,6 +103,10 @@ export async function addOffer(db, offer) {
   };
 
   const docRef = await offersCollection(db).add(data);
+
+  // Invalidate customer offers cache after successful DB commit
+  invalidateOffersCache();
+
   return { id: docRef.id, ...data };
 }
 
@@ -91,6 +132,10 @@ export async function updateOffer(db, id, updates) {
     const params = entries.map(([, value]) => value);
     params.push(id);
     await db.run(`UPDATE offers SET ${clauses} WHERE id = ?`, params);
+
+    // Invalidate customer offers cache after successful DB commit
+    invalidateOffersCache();
+
     return { id, ...updates };
   }
 
@@ -110,6 +155,10 @@ export async function updateOffer(db, id, updates) {
   }
 
   await offersCollection(db).doc(id).update(payload);
+
+  // Invalidate customer offers cache after successful DB commit
+  invalidateOffersCache();
+
   return { id, ...payload };
 }
 
@@ -119,9 +168,19 @@ export async function deleteOffer(db, id) {
 
   if (isSqliteDb(db)) {
     await db.run("DELETE FROM offers WHERE id = ?", [id]);
+
+    // Invalidate customer offers cache after successful DB commit
+    invalidateOffersCache();
+
     return { id };
   }
 
   await offersCollection(db).doc(id).delete();
+
+  // Invalidate customer offers cache after successful DB commit
+  invalidateOffersCache();
+
   return { id };
 }
+
+export { invalidateOffersCache, getCachedOffers, getOffersCacheStats };

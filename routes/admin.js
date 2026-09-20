@@ -65,7 +65,8 @@ import {
   getBillSections,
   setBillSections,
   getMenuItemFeedbacks,
-  markFeedbacksAsDownloaded
+  markFeedbacksAsDownloaded,
+  billPreview,
 } from "../services/adminService.js";
 import {
   getOffers,
@@ -73,6 +74,7 @@ import {
   updateOffer,
   deleteOffer,
 } from "../services/offerService.js";
+import { getMenuEtag, matchesIfNoneMatch, getCurrentMenuVersion } from "../services/menuCache.js";
 import {
   getAllPrinterConfigs,
   savePrinterConfig,
@@ -187,6 +189,20 @@ router.delete("/categories/:id", async (req, res, next) => {
 
 router.get("/menu", async (req, res, next) => {
   try {
+    let version = getCurrentMenuVersion();
+    if (version === null) {
+      version = await getMenuVersion(req.app.locals.db);
+    }
+    const etag = getMenuEtag("__all__", version);
+
+    res.setHeader("Cache-Control", "no-cache, must-revalidate");
+    res.setHeader("ETag", etag);
+
+    const clientEtag = req.headers["if-none-match"];
+    if (matchesIfNoneMatch(clientEtag, etag)) {
+      return res.status(304).end();
+    }
+
     const menu = await getMenuItems(req.app.locals.db);
     res.json(buildApiResponse(menu));
   } catch (err) {
@@ -291,6 +307,19 @@ router.get("/orders", async (req, res, next) => {
     res.json(buildApiResponse(orders));
   } catch (err) {
     next(buildApiError(err.message, 500));
+  }
+});
+
+router.get("/orders/:id/bill-preview", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Order ID is required" });
+    }
+    const preview = await billPreview(req.app.locals.db, id);
+    res.json(buildApiResponse(preview));
+  } catch (err) {
+    next(buildApiError(err.message, err.status || 500));
   }
 });
 
