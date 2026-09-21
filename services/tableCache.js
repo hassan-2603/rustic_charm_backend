@@ -84,7 +84,30 @@ export function resetTableCacheForTesting() {
  */
 async function defaultCanonicalLoader(db) {
   if (isSqliteDb(db)) {
-    return await db.all("SELECT * FROM tables ORDER BY table_number ASC");
+    const tables = await db.all("SELECT * FROM tables ORDER BY table_number ASC");
+    try {
+      const activeOrders = await db.all(
+        "SELECT id, table_id, table_reference, created_at FROM orders WHERE status NOT IN ('Completed', 'Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL) ORDER BY created_at DESC"
+      );
+      if (Array.isArray(activeOrders) && activeOrders.length > 0) {
+        const orderMap = new Map();
+        for (const o of activeOrders) {
+          if (o.table_id && !orderMap.has(o.table_id)) orderMap.set(o.table_id, o.id);
+          if (o.table_reference && !orderMap.has(o.table_reference)) orderMap.set(o.table_reference, o.id);
+        }
+        for (const t of tables) {
+          const matchedOrderId = orderMap.get(t.id) || orderMap.get(t.table_key);
+          if (matchedOrderId) {
+            t.occupied = 1;
+            t.status = "occupied";
+            if (!t.current_order_id) t.current_order_id = matchedOrderId;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to reconcile tables with active orders:", e?.message);
+    }
+    return tables;
   }
 
   // Firestore fallback if ever invoked in test/legacy mode

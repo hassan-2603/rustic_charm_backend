@@ -1052,10 +1052,21 @@ export async function updateOrder(db, id, updates) {
       if (updates.status === 'Completed') {
         const targetTableId = updates.tableId || currentOrder.table_id;
         if (targetTableId) {
-          await tx.run(
-            "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ?",
-            [now, targetTableId]
+          const remainingOrders = await tx.get(
+            "SELECT id FROM orders WHERE (table_id = ? OR table_reference = ?) AND id != ? AND status NOT IN ('Completed', 'Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL) ORDER BY created_at DESC LIMIT 1",
+            [targetTableId, currentOrder.table_reference || "", id]
           );
+          if (remainingOrders && remainingOrders.id) {
+            await tx.run(
+              "UPDATE tables SET occupied = 1, status = 'occupied', current_order_id = ?, updated_at = ? WHERE id = ?",
+              [remainingOrders.id, now, targetTableId]
+            );
+          } else {
+            await tx.run(
+              "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ?",
+              [now, targetTableId]
+            );
+          }
         }
         const targetSessionId = updates.sessionId || currentOrder.session_id;
         if (targetSessionId) {
@@ -1586,11 +1597,24 @@ export async function deleteOrder(db, id) {
     // Soft-archive order so it clears from screen views but is preserved in reports
     await db.run("UPDATE orders SET archived = 1 WHERE id = ?", [id]);
 
-    if (order.table_id) {
-      await db.run(
-        "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ?",
-        [new Date().toISOString()]
+    const targetTableId = order.table_id || (order.table_reference ? (await db.get("SELECT id FROM tables WHERE table_key = ? OR id = ? LIMIT 1", [order.table_reference, order.table_reference]))?.id : null);
+    if (targetTableId) {
+      const remainingOrders = await db.get(
+        "SELECT id FROM orders WHERE (table_id = ? OR table_reference = ?) AND id != ? AND status NOT IN ('Completed', 'Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL) ORDER BY created_at DESC LIMIT 1",
+        [targetTableId, order.table_reference || "", id]
       );
+      const now = new Date().toISOString();
+      if (remainingOrders && remainingOrders.id) {
+        await db.run(
+          "UPDATE tables SET occupied = 1, status = 'occupied', current_order_id = ?, updated_at = ? WHERE id = ?",
+          [remainingOrders.id, now, targetTableId]
+        );
+      } else {
+        await db.run(
+          "UPDATE tables SET occupied = 0, status = 'available', current_order_id = '', current_session_id = '', updated_at = ? WHERE id = ?",
+          [now, targetTableId]
+        );
+      }
       invalidateTableCache();
     }
 
