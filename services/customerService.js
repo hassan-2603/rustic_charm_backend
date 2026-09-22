@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { addOrderItems, getEffectiveBillSections } from "./adminService.js";
+import { addOrderItems, getEffectiveBillSections, extractEnglishBaseName, resolveEnglishItemName } from "./adminService.js";
 import { getCustomerTables, invalidateTableCache } from "./tableCache.js";
 import { calculateAuthoritativeBill } from "./billCalculationService.js";
 
@@ -163,13 +163,73 @@ async function generateOrderNumber(db) {
   return `RC-${String(lastNumber + 1).padStart(4, "0")}`;
 }
 
-function sanitizeOrderItems(items) {
+async function sanitizeOrderItems(db, items) {
   if (!Array.isArray(items)) return [];
+
+  // 1. Collect all menu item IDs
+  const itemIds = items.map((i) => i.menuItem?.id || i.menuItemId).filter(Boolean);
+  const dbItemMap = new Map();
+
+  if (itemIds.length > 0 && db && isSqliteDb(db)) {
+    try {
+      const placeholders = itemIds.map(() => "?").join(",");
+      const rows = await db.all(
+        `SELECT id, name FROM menu_items WHERE id IN (${placeholders})`,
+        itemIds
+      );
+      for (const row of rows || []) {
+        const en = extractEnglishBaseName(row.name);
+        if (en) dbItemMap.set(row.id, en);
+      }
+    } catch (e) {
+      console.warn("[sanitizeOrderItems] Warning querying menu_items:", e.message);
+    }
+  }
+
+  // 2. Fallback: check menu_translations for any non-English names if ID wasn't found in menu_items
+  const unmappedNames = items
+    .filter((i) => !dbItemMap.has(i.menuItem?.id || i.menuItemId))
+    .map((i) => (typeof i.menuItem?.name === "string" ? i.menuItem.name.trim() : ""))
+    .filter(Boolean);
+
+  const translationMap = new Map();
+  if (unmappedNames.length > 0 && db && isSqliteDb(db)) {
+    try {
+      const placeholders = unmappedNames.map(() => "?").join(",");
+      const transRows = await db.all(
+        `SELECT mt.name AS trans_name, mi.name AS english_name
+         FROM menu_translations mt
+         JOIN menu_items mi ON mt.menu_item_id = mi.id
+         WHERE mt.name IN (${placeholders})`,
+        unmappedNames
+      );
+      for (const r of transRows || []) {
+        const en = extractEnglishBaseName(r.english_name);
+        if (en && r.trans_name) {
+          translationMap.set(String(r.trans_name).toLowerCase().trim(), en);
+        }
+      }
+    } catch (e) {
+      console.warn("[sanitizeOrderItems] Warning querying menu_translations:", e.message);
+    }
+  }
+
   return items.map((item) => {
+    const id = item.menuItem?.id || item.menuItemId || "";
+    const rawProvidedName = typeof item.menuItem?.name === "string" ? item.menuItem.name.trim() : "";
+
     let name =
-      typeof item.menuItem?.name === "object"
-        ? item.menuItem?.name.English || Object.values(item.menuItem?.name)[0] || ""
-        : item.menuItem?.name || "";
+      dbItemMap.get(id) ||
+      (item.menuItem?.englishName ? String(item.menuItem.englishName).trim() : "") ||
+      translationMap.get(rawProvidedName.toLowerCase()) ||
+      (typeof item.menuItem?.name === "object"
+        ? (item.menuItem?.name.English || item.menuItem?.name.en || Object.values(item.menuItem?.name)[0] || "")
+        : rawProvidedName || "");
+
+    // If name is still empty, fallback to item.name
+    if (!name) {
+      name = item.name || "";
+    }
 
     if (item.selectedPriceOption && item.menuItem) {
       const rawOptions =
@@ -211,7 +271,7 @@ function sanitizeOrderItems(items) {
     }
 
     return {
-      menuItemId: item.menuItem?.id || "",
+      menuItemId: id,
       name,
       quantity: Number(item.quantity) || 1,
       price: Number(item.selectedPriceOption?.amount ?? item.menuItem?.price ?? 0),
@@ -259,7 +319,7 @@ async function createOrder(db, tableReference, cart, total, sessionId, customerN
     }
 
     if (existingOrder) {
-      const items = sanitizeOrderItems(cart);
+      const items = await sanitizeOrderItems(db, cart);
       await addOrderItems(db, existingOrder.id, items, "");
 
       if (sessionId) {
@@ -327,7 +387,7 @@ async function createOrder(db, tableReference, cart, total, sessionId, customerN
       [orderData.id, orderData.session_id, orderData.table_id, orderData.table_reference, orderData.table_number, orderData.table_area, orderData.table_label, orderData.order_number, orderData.status, orderData.total, orderData.customer_name, orderData.customer_phone, orderData.created_at, orderData.updated_at]
     );
 
-    const items = sanitizeOrderItems(cart);
+    const items = await sanitizeOrderItems(db, cart);
     for (const item of items) {
       await db.run(
         "INSERT INTO order_items (id, order_id, menu_item_id, name, quantity, price, special_instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -390,7 +450,7 @@ async function getOrdersBySession(db, sessionId) {
         items: items.map((item) => ({
           id: item.id,
           menuItemId: item.menu_item_id,
-          name: item.name,
+          name: resolveEnglishItemName(item),
           quantity: Number(item.quantity || 0),
           price: Number(item.price || 0),
           specialInstructions: item.special_instructions || "",

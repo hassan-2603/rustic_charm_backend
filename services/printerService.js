@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { calculateAuthoritativeBill } from "./billCalculationService.js";
-import { getEffectiveBillSections } from "./adminService.js";
+import { getEffectiveBillSections, resolveEnglishItemName } from "./adminService.js";
 
 // A printer is considered OFFLINE if the connector hasn't polled for jobs
 // in this long. "Configured" (has an IP/name saved) is NOT the same as
@@ -148,13 +148,16 @@ async function getOrderForPrint(db, orderId) {
   if (!order) throw Object.assign(new Error("Order not found"), { status: 404 });
   const items = await db.all(
     `SELECT order_items.*,
-            COALESCE(categories.name, menu_items.category_name, '') AS category_name,
-            COALESCE(categories.id, menu_items.category_id, '')     AS category_id,
-            menu_items.category_name                                AS mi_category_name,
-            menu_items.category_id                                  AS mi_category_id
+            COALESCE(menu_items.name, mi_trans.name, '')            AS mi_name,
+            COALESCE(categories.name, menu_items.category_name, mi_trans.category_name, '') AS category_name,
+            COALESCE(categories.id, menu_items.category_id, mi_trans.category_id, '')     AS category_id,
+            COALESCE(menu_items.category_name, mi_trans.category_name, '') AS mi_category_name,
+            COALESCE(menu_items.category_id, mi_trans.category_id, '')   AS mi_category_id
        FROM order_items
        LEFT JOIN menu_items ON (order_items.menu_item_id = menu_items.id OR (order_items.menu_item_id IS NULL AND LOWER(TRIM(order_items.name)) = LOWER(TRIM(menu_items.name))))
-       LEFT JOIN categories ON menu_items.category_id = categories.id
+       LEFT JOIN menu_translations mt ON (order_items.menu_item_id IS NULL AND LOWER(TRIM(order_items.name)) = LOWER(TRIM(mt.name)))
+       LEFT JOIN menu_items mi_trans ON mt.menu_item_id = mi_trans.id
+       LEFT JOIN categories ON COALESCE(menu_items.category_id, mi_trans.category_id) = categories.id
        WHERE order_items.order_id = ?
        ORDER BY order_items.created_at ASC`,
     [orderId]
@@ -163,7 +166,7 @@ async function getOrderForPrint(db, orderId) {
   const mappedItems = items.map((item) => ({
     id: item.id,
     menuItemId: item.menu_item_id || "",
-    name: item.name,
+    name: resolveEnglishItemName(item),
     category: item.category_name || item.mi_category_name || "",
     categoryId: item.category_id || item.mi_category_id || "",
     quantity: Number(item.quantity || 0),
@@ -270,9 +273,9 @@ function buildKotPayload(order) {
     tableNumber: order.tableLabel,
     waiterName: order.waiterName,
     date: formatIndiaDateTime(),
-    items: (order.items || []).map((item) => ({ name: item.name, quantity: Number(item.quantity || 1) })),
-    addedItems: order.addedItems ? order.addedItems.map((item) => ({ name: item.name, quantity: Number(item.quantity || 1) })) : [],
-    removedItems: order.removedItems ? order.removedItems.map((item) => ({ name: item.name, quantity: Number(item.quantity || 1) })) : [],
+    items: (order.items || []).map((item) => ({ name: resolveEnglishItemName(item), quantity: Number(item.quantity || 1) })),
+    addedItems: order.addedItems ? order.addedItems.map((item) => ({ name: resolveEnglishItemName(item), quantity: Number(item.quantity || 1) })) : [],
+    removedItems: order.removedItems ? order.removedItems.map((item) => ({ name: resolveEnglishItemName(item), quantity: Number(item.quantity || 1) })) : [],
     description: order.description,
   };
 }
@@ -346,7 +349,10 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
 
         const splitOrder = {
           ...order,
-          items: items,
+          items: items.map((item) => ({
+            ...item,
+            name: resolveEnglishItemName(item),
+          })),
           total: Number(split.subtotal || 0),
           finalTotal: Number(split.total || split.subtotal || 0),
           discountAmount: 0,
@@ -389,15 +395,18 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
     isDiffPrint = true;
     addedItemsOverall = items.map((i) => ({
       ...i,
+      name: resolveEnglishItemName(i),
       quantity: Number(i.quantity || 1),
     }));
   } else if (action === "REMOVE" && Array.isArray(items) && items.length > 0) {
     isDiffPrint = true;
     removedItemsOverall = items.map((i) => ({
       ...i,
+      name: resolveEnglishItemName(i),
       quantity: Number(i.quantity || 1),
     }));
-  } else if (order.lastPrintedItems) {
+  }
+ else if (order.lastPrintedItems) {
     // 2. Automatic diff against lastPrintedItems
     isDiffPrint = true;
     const currentItemMap = {};

@@ -13,7 +13,7 @@ import customerRouter from "./routes/customer.js";
 import adminRouter from "./routes/admin.js";
 import staffRouter from "./routes/staff.js";
 import connectorRouter from "./routes/connector.js";
-import { getCategories, getMenuItems, addMenuItem, deleteMenuItem, getOrders, getMenuVersion, initMenuVersion, healUnlinkedMenuItems } from "./services/adminService.js";
+import { getCategories, getMenuItems, addMenuItem, deleteMenuItem, getOrders, getMenuVersion, initMenuVersion, healUnlinkedMenuItems, healNonEnglishOrderItems } from "./services/adminService.js";
 import { getMenuEtag, matchesIfNoneMatch, getCurrentMenuVersion } from "./services/menuCache.js";
 import { createOrder } from "./services/customerService.js";
 import { getOffers as getAdminOffers, getActiveOffers, addOffer as addAdminOffer, updateOffer as updateAdminOffer, deleteOffer as deleteAdminOffer } from "./services/offerService.js";
@@ -387,6 +387,11 @@ async function startServer() {
     // Self-heal any unlinked menu items on startup
     await healUnlinkedMenuItems(sqliteDb).catch((err) => {
       console.warn("[startServer] Self-healing unlinked menu items warning:", err.message);
+    });
+
+    // Self-heal any non-English order items on startup
+    await healNonEnglishOrderItems(sqliteDb).catch((err) => {
+      console.warn("[startServer] Self-healing non-English order items warning:", err.message);
     });
 
     app.listen(PORT, () => {

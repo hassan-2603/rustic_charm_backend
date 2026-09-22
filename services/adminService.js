@@ -67,6 +67,23 @@ function normalizeMenuText(value) {
   return str;
 }
 
+export function extractEnglishBaseName(nameValue) {
+  return normalizeMenuText(nameValue);
+}
+
+export function resolveEnglishItemName(item) {
+  if (!item) return "";
+  let base = extractEnglishBaseName(item.mi_name || item.englishName || "");
+  if (base) {
+    const suffixMatch = String(item.name || "").match(/\s*\([^)]+\)$/);
+    if (suffixMatch && !base.includes(suffixMatch[0].trim())) {
+      return `${base} ${suffixMatch[0].trim()}`;
+    }
+    return base;
+  }
+  return normalizeMenuText(item.name);
+}
+
 /**
  * Resolves a category name or ID to its { id, name } row.
  * Returns { id, name } when found, or { id: null, name: candidateName } when not found
@@ -328,8 +345,11 @@ export async function fetchMenuItemsFromDb(db, lang) {
       const localized = targetLang && targetLang !== "en" ? transObj[targetLang] : null;
 
       const rawName = parseJsonField(row.name);
+      const englishBaseName = typeof rawName === "object" && rawName !== null
+        ? (rawName.English || rawName.en || Object.values(rawName)[0] || "")
+        : String(row.name || "");
       const rawDesc = parseJsonField(row.description) || "";
-      const itemName = localized?.name || (typeof rawName === "object" && rawName !== null ? (rawName[targetLang || "en"] || rawName.en || rawName.English || Object.values(rawName)[0]) : rawName);
+      const itemName = localized?.name || englishBaseName;
 
       let itemDesc = "";
       if (localized?.description) {
@@ -423,6 +443,7 @@ export async function fetchMenuItemsFromDb(db, lang) {
         category: englishCategory || itemCategory || row.category_name || row.category_id || "",
         categoryLocalized: itemCategory || englishCategory || "",
         name: itemName,
+        englishName: englishBaseName,
         description: itemDesc,
         price: Number(row.price || 0),
         imageUrl: row.image_url || "",
@@ -753,6 +774,7 @@ export async function getOrders(db, { includeCompleted = false, forReports = fal
     const itemsRows = await db.all(
       `SELECT
           oi.*,
+          COALESCE(mi.name, '')                  AS mi_name,
           COALESCE(c.name, mi.category_name, '') AS category_name,
           COALESCE(c.id, mi.category_id, '')     AS category_id,
           mi.category_name                       AS mi_category_name,
@@ -769,6 +791,7 @@ export async function getOrders(db, { includeCompleted = false, forReports = fal
     for (const item of itemsRows) {
       const resolvedItem = {
         ...item,
+        name: resolveEnglishItemName(item),
         category: item.category_name || item.mi_category_name || "",
         categoryId: item.category_id || item.mi_category_id || "",
       };
@@ -867,9 +890,18 @@ export async function createAdminOrder(db, order) {
     [id, table.id, table.table_key, table.table_number, table.area, table.display_name, orderNumber, "admin", "Accepted", Number(order.total) || 0, waiter.id, waiter.name, order.description || "", now, now, now]
   );
   for (const item of order.items) {
+    let englishName = item.name || "";
+    if (item.menuItemId) {
+      const mi = await db.get("SELECT name FROM menu_items WHERE id = ?", [item.menuItemId]);
+      if (mi && mi.name) {
+        englishName = resolveEnglishItemName({ mi_name: mi.name, name: item.name });
+      }
+    } else {
+      englishName = resolveEnglishItemName(item);
+    }
     await db.run(
       "INSERT INTO order_items (id, order_id, menu_item_id, name, quantity, price, special_instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      [crypto.randomUUID(), id, item.menuItemId || null, item.name || "", Math.max(1, Number(item.quantity) || 1), Number(item.price) || 0, "", now]
+      [crypto.randomUUID(), id, item.menuItemId || null, englishName, Math.max(1, Number(item.quantity) || 1), Number(item.price) || 0, "", now]
     );
   }
   await db.run("UPDATE tables SET occupied = 1, status = 'occupied', current_order_id = ?, updated_at = ? WHERE id = ?", [id, now, table.id]);
@@ -1179,13 +1211,22 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
 
       for (const item of itemsToAdd) {
         const menuItemId = item.menuItemId || null;
+        let englishName = item.name || "";
+        if (menuItemId) {
+          const mi = await tx.get("SELECT name FROM menu_items WHERE id = ?", [menuItemId]);
+          if (mi && mi.name) {
+            englishName = resolveEnglishItemName({ mi_name: mi.name, name: item.name });
+          }
+        } else {
+          englishName = resolveEnglishItemName(item);
+        }
         const insertQty = Math.max(1, Number(item.quantity) || 1);
         const insertPrice = Number(item.price) || 0;
         let didUpdate = false;
         if (menuItemId) {
-          const existing = await tx.get("SELECT id, quantity FROM order_items WHERE order_id = ? AND menu_item_id = ? AND price = ?", [id, menuItemId, insertPrice]);
+          const existing = await tx.get("SELECT id, quantity, name FROM order_items WHERE order_id = ? AND menu_item_id = ? AND price = ?", [id, menuItemId, insertPrice]);
           if (existing) {
-            await tx.run("UPDATE order_items SET quantity = quantity + ? WHERE id = ?", [insertQty, existing.id]);
+            await tx.run("UPDATE order_items SET quantity = quantity + ?, name = ? WHERE id = ?", [insertQty, englishName || existing.name, existing.id]);
             didUpdate = true;
           }
         }
@@ -1196,7 +1237,7 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
               crypto.randomUUID(),
               id,
               menuItemId,
-              item.name || "",
+              englishName,
               insertQty,
               insertPrice,
               "",
@@ -1957,6 +1998,7 @@ export async function billPreview(db, orderId) {
 
     const rawItems = await tx.all(
       `SELECT oi.id, oi.menu_item_id, oi.name, oi.quantity, oi.price,
+              COALESCE(mi.name, '')                  AS mi_name,
               COALESCE(c.name, mi.category_name, '') AS category_name,
               COALESCE(c.id, mi.category_id, '')     AS category_id,
               mi.category_name                       AS mi_category_name,
@@ -1979,7 +2021,7 @@ export async function billPreview(db, orderId) {
     const items = rawItems.map((row) => ({
       id: row.id,
       menuItemId: row.menu_item_id || "",
-      name: row.name || "",
+      name: resolveEnglishItemName(row),
       quantity: Number(row.quantity || 0),
       price: Number(row.price || 0),
       category: row.category_name || row.mi_category_name || "",
@@ -2039,6 +2081,35 @@ export async function healUnlinkedMenuItems(db) {
     }
   } catch (e) {
     console.warn("[healUnlinkedMenuItems] Warning during self-healing:", e.message);
+  }
+}
+
+/**
+ * Self-heals any order_items that have Russian or non-English characters in their name.
+ */
+export async function healNonEnglishOrderItems(db) {
+  if (!db) return;
+  try {
+    const rows = await db.all(
+      `SELECT oi.id, oi.name, mi.name AS mi_name
+       FROM order_items oi
+       JOIN menu_items mi ON oi.menu_item_id = mi.id`
+    );
+    for (const row of rows || []) {
+      if (/[А-Яа-я]/.test(row.name)) {
+        const en = extractEnglishBaseName(row.mi_name);
+        if (en) {
+          const suffixMatch = String(row.name || "").match(/\s*\([^)]+\)$/);
+          const resolvedName = suffixMatch && !en.includes(suffixMatch[0].trim())
+            ? `${en} ${suffixMatch[0].trim()}`
+            : en;
+          await db.run("UPDATE order_items SET name = ? WHERE id = ?", [resolvedName, row.id]);
+          console.log(`[heal] Restored English name for order_item ${row.id}: "${row.name}" -> "${resolvedName}"`);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[healNonEnglishOrderItems] Warning during self-healing:", e.message);
   }
 }
 
