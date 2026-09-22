@@ -464,7 +464,16 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
     return []; // Nothing to print
   }
 
+  // Deterministic section ordering: Kitchen Food first, Tandoor second, Bar & Beverages third
+  const SECTION_ORDER = {
+    "Food": 1,
+    "Indian Tandoor": 2,
+    "Bar & Beverages": 3,
+  };
+  keys.sort((a, b) => (SECTION_ORDER[a] || 99) - (SECTION_ORDER[b] || 99) || a.localeCompare(b));
+
   const createdJobs = [];
+  let seqOffset = 0;
   for (const sectionName of keys) {
     const sectionItemsList = sectionItems[sectionName] || [];
     const sectionAddedList = sectionAddedItems[sectionName] || [];
@@ -480,10 +489,12 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
     kotPayload.section = sectionName;
 
     const id = crypto.randomUUID();
+    // Offset each section by 1 second to ensure strict deterministic FIFO processing across all databases
+    const jobTimestamp = new Date(Date.now() + (seqOffset++) * 1000).toISOString();
     await db.run(
       `INSERT INTO print_jobs (id, order_id, type, printer_id, status, payload, is_test, created_by, attempts, max_attempts, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, 0, ?, ?, ?)`,
-      [id, orderId, normalizedType, printerId, JSON.stringify({ kot: kotPayload }), 0, createdBy || null, DEFAULT_MAX_ATTEMPTS, now, now]
+      [id, orderId, normalizedType, printerId, JSON.stringify({ kot: kotPayload }), 0, createdBy || null, DEFAULT_MAX_ATTEMPTS, jobTimestamp, jobTimestamp]
     );
     const row = await db.get("SELECT * FROM print_jobs WHERE id = ?", [id]);
     createdJobs.push(rowToJob(row));
@@ -513,7 +524,7 @@ export async function retryPrintJob(db, jobId) {
   if (!row) throw Object.assign(new Error("Print job not found"), { status: 404 });
   const now = new Date().toISOString();
   await db.run(
-    "UPDATE print_jobs SET status = 'PENDING', error_message = NULL, claimed_at = NULL, updated_at = ? WHERE id = ?",
+    "UPDATE print_jobs SET status = 'PENDING', attempts = 0, error_message = NULL, claimed_at = NULL, updated_at = ? WHERE id = ?",
     [now, jobId]
   );
   const updated = await db.get("SELECT * FROM print_jobs WHERE id = ?", [jobId]);
@@ -526,28 +537,84 @@ export async function retryPrintJob(db, jobId) {
  * of PENDING jobs as PROCESSING so two connector instances (or a retry
  * racing a poll) can never both print the same job, then returns each job
  * together with the printer settings it should be sent to.
+ *
+ * CRITICAL RELIABILITY GUARANTEE:
+ * 1. Claims AT MOST ONE job per physical printer (`printer_id`) per cycle.
+ *    For multi-section KOTs (e.g. Food, Indian Tandoor, Bar & Beverages),
+ *    this serializes the tickets so each ticket prints and finishes cutting
+ *    before the next ticket is dispatched to the physical hardware.
+ * 2. Auto-recovers stale PROCESSING jobs (> 45s) so no print command is EVER
+ *    lost, ignored, or dropped if a connector briefly disconnects.
+ * 3. Enforces a 2-second mechanical cutter settle cooldown between tickets on the same printer.
  */
 export async function claimPendingJobs(db, limit = 5) {
   await markPrinterSeen(db, "bill");
   await markPrinterSeen(db, "kot");
 
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  // 1. Auto-recover abandoned PROCESSING jobs (older than 45 seconds).
+  // If the connector crashed or network dropped mid-job, reset to PENDING so it is retried.
+  const staleThreshold = new Date(now.getTime() - 45000).toISOString();
+  await db.run(
+    "UPDATE print_jobs SET status = 'PENDING', claimed_at = NULL, updated_at = ? WHERE status = 'PROCESSING' AND claimed_at IS NOT NULL AND claimed_at < ?",
+    [nowIso, staleThreshold]
+  ).catch((err) => {
+    console.warn("[printerService] Auto-recovery of stale jobs failed:", err.message);
+  });
+
+  // 2. Determine which printers are currently busy:
+  // A printer cannot accept a new ticket if:
+  //   a) A job is actively in PROCESSING on that printer
+  //   b) A job was marked PRINTED on that printer within the last 2000ms (physical cutter cooldown)
+  const busyPrinterIds = new Set();
+
+  const activeProcessing = await db.all("SELECT printer_id FROM print_jobs WHERE status = 'PROCESSING'");
+  for (const row of activeProcessing) {
+    busyPrinterIds.add(row.printer_id);
+  }
+
+  // Check the last completed print per printer for paper-cutter settle delay (2000ms)
+  const recentPrints = await db.all(
+    "SELECT printer_id, MAX(printed_at) as last_printed_at FROM print_jobs WHERE status = 'PRINTED' AND printed_at IS NOT NULL GROUP BY printer_id"
+  );
+  for (const row of recentPrints) {
+    if (row.last_printed_at) {
+      const printedTime = new Date(row.last_printed_at).getTime();
+      if (!isNaN(printedTime) && (now.getTime() - printedTime) < 2000) {
+        busyPrinterIds.add(row.printer_id);
+      }
+    }
+  }
+
+  // 3. Fetch pending jobs ordered strictly by created_at ASC
   const pending = await db.all(
     "SELECT * FROM print_jobs WHERE status = 'PENDING' ORDER BY created_at ASC LIMIT ?",
     [Math.max(1, Math.min(20, Number(limit) || 5))]
   );
   if (pending.length === 0) return [];
 
-  const now = new Date().toISOString();
+  // 4. Atomically claim AT MOST ONE job per physical printer_id per poll cycle
   const claimed = [];
+  const claimedPrinterIds = new Set();
+
   for (const row of pending) {
-    // Guard against a race with a concurrent poll/retry by only claiming
-    // rows still PENDING at the moment of the UPDATE.
+    if (busyPrinterIds.has(row.printer_id) || claimedPrinterIds.has(row.printer_id)) {
+      continue; // Wait for this physical printer to become idle and clear of the previous paper cut
+    }
+
     const result = await db.run(
       "UPDATE print_jobs SET status = 'PROCESSING', attempts = attempts + 1, claimed_at = ?, updated_at = ? WHERE id = ? AND status = 'PENDING'",
-      [now, now, row.id]
+      [nowIso, nowIso, row.id]
     );
-    if (result.changes > 0) claimed.push(row);
+    if (result.changes > 0) {
+      claimed.push(row);
+      claimedPrinterIds.add(row.printer_id);
+    }
   }
+
+  if (claimed.length === 0) return [];
 
   const printers = await getAllPrinterConfigs(db);
   return claimed.map((row) => ({
