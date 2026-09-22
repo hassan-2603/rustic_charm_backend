@@ -11,7 +11,7 @@ const PRINTER_ONLINE_THRESHOLD_MS = 20_000;
 // they're left FAILED for the admin to retry manually. Keeps a printer
 // that's briefly off from silently dropping a bill, without retrying
 // forever per the "no infinite retry" requirement.
-const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_MAX_ATTEMPTS = 5;
 
 /**
  * Any category whose name contains one of these words (case-insensitive) is
@@ -554,15 +554,22 @@ export async function claimPendingJobs(db, limit = 5) {
   const now = new Date();
   const nowIso = now.toISOString();
 
-  // 1. Auto-recover abandoned PROCESSING jobs (older than 45 seconds).
-  // If the connector crashed or network dropped mid-job, reset to PENDING so it is retried.
+  // 1. Auto-recover abandoned PROCESSING jobs (created within last 30 minutes, but stuck in PROCESSING for > 45 seconds).
+  // CRITICAL: Must NEVER revive ancient jobs from days/weeks ago! Only active orders from the last 30 minutes!
   const staleThreshold = new Date(now.getTime() - 45000).toISOString();
+  const maxJobAge = new Date(now.getTime() - 30 * 60 * 1000).toISOString();
   await db.run(
-    "UPDATE print_jobs SET status = 'PENDING', claimed_at = NULL, updated_at = ? WHERE status = 'PROCESSING' AND claimed_at IS NOT NULL AND claimed_at < ?",
-    [nowIso, staleThreshold]
+    "UPDATE print_jobs SET status = 'PENDING', claimed_at = NULL, updated_at = ? WHERE status = 'PROCESSING' AND claimed_at IS NOT NULL AND claimed_at < ? AND created_at >= ?",
+    [nowIso, staleThreshold, maxJobAge]
   ).catch((err) => {
     console.warn("[printerService] Auto-recovery of stale jobs failed:", err.message);
   });
+
+  // Permanently cancel any ancient PROCESSING jobs older than 30 minutes so they never print
+  await db.run(
+    "UPDATE print_jobs SET status = 'CANCELLED', updated_at = ? WHERE status = 'PROCESSING' AND created_at < ?",
+    [nowIso, maxJobAge]
+  ).catch(() => {});
 
   // 2. Determine which printers are currently busy:
   // A printer cannot accept a new ticket if:
@@ -598,10 +605,19 @@ export async function claimPendingJobs(db, limit = 5) {
   // 4. Atomically claim AT MOST ONE job per physical printer_id per poll cycle
   const claimed = [];
   const claimedPrinterIds = new Set();
+  const retryCooldownTime = now.getTime() - 8000; // 8-second cooldown between retry attempts
 
   for (const row of pending) {
     if (busyPrinterIds.has(row.printer_id) || claimedPrinterIds.has(row.printer_id)) {
       continue; // Wait for this physical printer to become idle and clear of the previous paper cut
+    }
+
+    // If this job previously failed an attempt, wait at least 8 seconds before retrying
+    if (row.attempts > 0 && row.updated_at) {
+      const lastAttemptTime = new Date(row.updated_at).getTime();
+      if (!isNaN(lastAttemptTime) && lastAttemptTime > retryCooldownTime) {
+        continue;
+      }
     }
 
     const result = await db.run(
