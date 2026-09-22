@@ -421,7 +421,7 @@ async function getOrdersBySession(db, sessionId) {
        FROM orders o 
        LEFT JOIN waiters w ON o.waiter_id = w.id 
        WHERE o.session_id = ? 
-       ORDER BY o.created_at DESC`,
+       ORDER BY o.created_at ASC`,
       [sessionId]
     );
     const orders = [];
