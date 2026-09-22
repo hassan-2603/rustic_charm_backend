@@ -556,6 +556,19 @@ export async function claimPendingJobs(db, limit = 5) {
     [nowIso, maxJobAge]
   ).catch(() => {});
 
+  // 2. Identify physical printers currently busy with a job in PROCESSING
+  const activeProcessing = await db.all("SELECT printer_id FROM print_jobs WHERE status = 'PROCESSING'");
+  const busyPrinterIds = new Set(activeProcessing.map((r) => r.printer_id));
+
+  const printers = await getAllPrinterConfigs(db);
+  const busyPhysicalPrinters = new Set();
+  for (const pid of busyPrinterIds) {
+    const config = printers[pid];
+    if (config?.printerName) {
+      busyPhysicalPrinters.add(config.printerName.toLowerCase());
+    }
+  }
+
   const pending = await db.all(
     "SELECT * FROM print_jobs WHERE status = 'PENDING' ORDER BY created_at ASC LIMIT ?",
     [Math.max(1, Math.min(20, Number(limit) || 5))]
@@ -563,25 +576,37 @@ export async function claimPendingJobs(db, limit = 5) {
   if (pending.length === 0) return [];
 
   const claimed = [];
+  const claimedPrinterIds = new Set();
+  const claimedPhysicalPrinters = new Set();
+
   for (const row of pending) {
+    const printerConfig = printers[row.printer_id];
+    const physicalName = printerConfig?.printerName ? printerConfig.printerName.toLowerCase() : row.printer_id;
+
+    // Do not claim if this physical printer is actively printing another job (PROCESSING)
+    // or if we already claimed a job for this printer in this batch!
+    if (
+      busyPrinterIds.has(row.printer_id) ||
+      busyPhysicalPrinters.has(physicalName) ||
+      claimedPrinterIds.has(row.printer_id) ||
+      claimedPhysicalPrinters.has(physicalName)
+    ) {
+      continue;
+    }
+
     const result = await db.run(
       "UPDATE print_jobs SET status = 'PROCESSING', attempts = attempts + 1, claimed_at = ?, updated_at = ? WHERE id = ? AND status = 'PENDING'",
       [nowIso, nowIso, row.id]
     );
-    if (result.changes > 0) claimed.push(row);
+    if (result.changes > 0) {
+      claimed.push(row);
+      claimedPrinterIds.add(row.printer_id);
+      claimedPhysicalPrinters.add(physicalName);
+    }
   }
-
-  const printers = await getAllPrinterConfigs(db);
-  return claimed.map((row) => ({
-    ...rowToJob({ ...row, status: "PROCESSING" }),
-    payload: JSON.parse(row.payload),
-    printer: printers[row.printer_id],
-  }));
-}
 
   if (claimed.length === 0) return [];
 
-  const printers = await getAllPrinterConfigs(db);
   return claimed.map((row) => ({
     ...rowToJob({ ...row, status: "PROCESSING" }),
     payload: JSON.parse(row.payload),
