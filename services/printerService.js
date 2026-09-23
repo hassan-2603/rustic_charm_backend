@@ -98,8 +98,10 @@ export async function getAllPrinterConfigs(db) {
 
 export async function savePrinterConfig(db, printerId, settings) {
   if (!["bill", "kot"].includes(printerId)) throw Object.assign(new Error("Printer must be 'bill' or 'kot'"), { status: 400 });
-  const connectionType = settings.connectionType === "windows" ? "windows" : "network";
+  const rawIp = (settings.ipAddress || "").trim();
+  const connectionType = settings.connectionType === "windows" && !rawIp ? "windows" : (settings.connectionType || "network");
   const paperWidth = settings.paperWidth === "58mm" ? "58mm" : "80mm";
+  const port = settings.port ? Number(settings.port) : (connectionType === "network" ? 9100 : null);
   const now = new Date().toISOString();
   await db.run(
     `INSERT INTO printers (id, printer_name, connection_type, ip_address, port, paper_width, copies, auto_cut, auto_print, updated_at)
@@ -116,10 +118,10 @@ export async function savePrinterConfig(db, printerId, settings) {
        updated_at = VALUES(updated_at)`,
     [
       printerId,
-      settings.printerName || "",
+      (settings.printerName || "").trim(),
       connectionType,
-      settings.ipAddress || "",
-      settings.port ? Number(settings.port) : null,
+      rawIp,
+      port,
       paperWidth,
       Math.max(1, Number(settings.copies) || 1),
       settings.autoCut === false ? 0 : 1,
