@@ -899,9 +899,10 @@ export async function createAdminOrder(db, order) {
     } else {
       englishName = resolveEnglishItemName(item);
     }
+    const itemNote = (item.specialInstructions || item.note || item.special_instructions || "").trim();
     await db.run(
       "INSERT INTO order_items (id, order_id, menu_item_id, name, quantity, price, special_instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      [crypto.randomUUID(), id, item.menuItemId || null, englishName, Math.max(1, Number(item.quantity) || 1), Number(item.price) || 0, "", now]
+      [crypto.randomUUID(), id, item.menuItemId || null, englishName, Math.max(1, Number(item.quantity) || 1), Number(item.price) || 0, itemNote, now]
     );
   }
   await db.run("UPDATE tables SET occupied = 1, status = 'occupied', current_order_id = ?, updated_at = ? WHERE id = ?", [id, now, table.id]);
@@ -1222,9 +1223,13 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
         }
         const insertQty = Math.max(1, Number(item.quantity) || 1);
         const insertPrice = Number(item.price) || 0;
+        const itemNote = (item.specialInstructions || item.note || item.special_instructions || "").trim();
         let didUpdate = false;
         if (menuItemId) {
-          const existing = await tx.get("SELECT id, quantity, name FROM order_items WHERE order_id = ? AND menu_item_id = ? AND price = ?", [id, menuItemId, insertPrice]);
+          const existing = await tx.get(
+            "SELECT id, quantity, name FROM order_items WHERE order_id = ? AND menu_item_id = ? AND price = ? AND COALESCE(special_instructions, '') = ?",
+            [id, menuItemId, insertPrice, itemNote]
+          );
           if (existing) {
             await tx.run("UPDATE order_items SET quantity = quantity + ?, name = ? WHERE id = ?", [insertQty, englishName || existing.name, existing.id]);
             didUpdate = true;
@@ -1240,7 +1245,7 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
               englishName,
               insertQty,
               insertPrice,
-              "",
+              itemNote,
               now,
             ]
           );

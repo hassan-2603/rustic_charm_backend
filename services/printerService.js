@@ -173,6 +173,8 @@ async function getOrderForPrint(db, orderId) {
     categoryId: item.category_id || item.mi_category_id || "",
     quantity: Number(item.quantity || 0),
     price: Number(item.price || 0),
+    specialInstructions: item.special_instructions || "",
+    note: item.special_instructions || "",
   }));
 
   // Authoritative total strictly calculated from the order items
@@ -269,16 +271,22 @@ export function buildBillPayload(order, billSectionsConfig) {
 }
 
 
-function buildKotPayload(order) {
+export function formatKotItemName(item) {
+  const baseName = resolveEnglishItemName(item);
+  const note = (item.note || item.specialInstructions || item.special_instructions || "").trim();
+  return note ? `${baseName} (${note})` : baseName;
+}
+
+export function buildKotPayload(order) {
   return {
     orderNumber: order.orderNumber,
     tableNumber: order.tableLabel,
     waiterName: order.waiterName,
     date: formatIndiaDateTime(),
-    items: (order.items || []).map((item) => ({ name: resolveEnglishItemName(item), quantity: Number(item.quantity || 1) })),
-    addedItems: order.addedItems ? order.addedItems.map((item) => ({ name: resolveEnglishItemName(item), quantity: Number(item.quantity || 1) })) : [],
-    removedItems: order.removedItems ? order.removedItems.map((item) => ({ name: resolveEnglishItemName(item), quantity: Number(item.quantity || 1) })) : [],
-    description: order.description,
+    items: (order.items || []).map((item) => ({ name: formatKotItemName(item), quantity: Number(item.quantity || 1) })),
+    addedItems: order.addedItems ? order.addedItems.map((item) => ({ name: formatKotItemName(item), quantity: Number(item.quantity || 1) })) : [],
+    removedItems: order.removedItems ? order.removedItems.map((item) => ({ name: formatKotItemName(item), quantity: Number(item.quantity || 1) })) : [],
+    description: null,
   };
 }
 
@@ -399,6 +407,7 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
       ...i,
       name: resolveEnglishItemName(i),
       quantity: Number(i.quantity || 1),
+      note: (i.note || i.specialInstructions || i.special_instructions || "").trim(),
     }));
   } else if (action === "REMOVE" && Array.isArray(items) && items.length > 0) {
     isDiffPrint = true;
@@ -406,6 +415,7 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
       ...i,
       name: resolveEnglishItemName(i),
       quantity: Number(i.quantity || 1),
+      note: (i.note || i.specialInstructions || i.special_instructions || "").trim(),
     }));
   }
  else if (order.lastPrintedItems) {
@@ -413,18 +423,21 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
     isDiffPrint = true;
     const currentItemMap = {};
     for (const item of order.items) {
-      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}`;
+      const note = (item.note || item.specialInstructions || item.special_instructions || "").trim();
+      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}_${note}`;
       currentItemMap[key] = item;
     }
     const lastItemMap = {};
     for (const item of order.lastPrintedItems) {
-      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}`;
+      const note = (item.note || item.specialInstructions || item.special_instructions || "").trim();
+      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}_${note}`;
       lastItemMap[key] = item;
     }
 
     // Check additions or quantity increases
     for (const item of order.items) {
-      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}`;
+      const note = (item.note || item.specialInstructions || item.special_instructions || "").trim();
+      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}_${note}`;
       const prev = lastItemMap[key];
       if (!prev) {
         addedItemsOverall.push({ ...item });
@@ -435,7 +448,8 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
 
     // Check removals or quantity decreases
     for (const item of order.lastPrintedItems) {
-      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}`;
+      const note = (item.note || item.specialInstructions || item.special_instructions || "").trim();
+      const key = item.id || `${item.menuItemId || item.menu_item_id || ""}_${item.name}_${note}`;
       const cur = currentItemMap[key];
       if (!cur) {
         removedItemsOverall.push({ ...item });
@@ -491,7 +505,7 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
 
     const kotPayload = buildKotPayload({
       ...order,
-      description: description || order.description,
+      description: null,
       items: sectionItemsList,
       addedItems: sectionAddedList,
       removedItems: sectionRemovedList
