@@ -286,7 +286,7 @@ export function buildKotPayload(order) {
     items: (order.items || []).map((item) => ({ name: formatKotItemName(item), quantity: Number(item.quantity || 1) })),
     addedItems: order.addedItems ? order.addedItems.map((item) => ({ name: formatKotItemName(item), quantity: Number(item.quantity || 1) })) : [],
     removedItems: order.removedItems ? order.removedItems.map((item) => ({ name: formatKotItemName(item), quantity: Number(item.quantity || 1) })) : [],
-    description: null,
+    description: order.description || null,
   };
 }
 
@@ -505,7 +505,7 @@ export async function createPrintJob(db, { orderId, type, createdBy, isTest = fa
 
     const kotPayload = buildKotPayload({
       ...order,
-      description: null,
+      description: description !== undefined && description !== null ? description : order.description,
       items: sectionItemsList,
       addedItems: sectionAddedList,
       removedItems: sectionRemovedList

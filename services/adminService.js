@@ -1227,11 +1227,11 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
         let didUpdate = false;
         if (menuItemId) {
           const existing = await tx.get(
-            "SELECT id, quantity, name FROM order_items WHERE order_id = ? AND menu_item_id = ? AND price = ? AND COALESCE(special_instructions, '') = ?",
-            [id, menuItemId, insertPrice, itemNote]
+            "SELECT id, quantity, name FROM order_items WHERE order_id = ? AND menu_item_id = ? AND name = ? AND price = ? AND COALESCE(special_instructions, '') = ?",
+            [id, menuItemId, englishName, insertPrice, itemNote]
           );
           if (existing) {
-            await tx.run("UPDATE order_items SET quantity = quantity + ?, name = ? WHERE id = ?", [insertQty, englishName || existing.name, existing.id]);
+            await tx.run("UPDATE order_items SET quantity = quantity + ? WHERE id = ?", [insertQty, existing.id]);
             didUpdate = true;
           }
         }
