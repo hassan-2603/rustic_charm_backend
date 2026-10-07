@@ -180,6 +180,11 @@ async function ensureCategoryNameColumn(db) {
   } catch (e) {
     // Column already exists — that's fine
   }
+  try {
+    await db.run("ALTER TABLE menu_items MODIFY COLUMN category_name TEXT");
+  } catch (e) {
+    // SQLite doesn't support MODIFY COLUMN (column is already TEXT in SQLite) — that's fine
+  }
   // Backfill: for items that have category_id, set category_name from the categories table
   await db.run(`
     UPDATE menu_items
@@ -1225,15 +1230,21 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
         const insertPrice = Number(item.price) || 0;
         const itemNote = (item.specialInstructions || item.note || item.special_instructions || "").trim();
         let didUpdate = false;
+        let existing;
         if (menuItemId) {
-          const existing = await tx.get(
-            "SELECT id, quantity, name FROM order_items WHERE order_id = ? AND menu_item_id = ? AND name = ? AND price = ? AND COALESCE(special_instructions, '') = ?",
+          existing = await tx.get(
+            "SELECT id, quantity, name FROM order_items WHERE order_id = ? AND menu_item_id = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?)) AND price = ? AND COALESCE(special_instructions, '') = ?",
             [id, menuItemId, englishName, insertPrice, itemNote]
           );
-          if (existing) {
-            await tx.run("UPDATE order_items SET quantity = quantity + ? WHERE id = ?", [insertQty, existing.id]);
-            didUpdate = true;
-          }
+        } else {
+          existing = await tx.get(
+            "SELECT id, quantity, name FROM order_items WHERE order_id = ? AND menu_item_id IS NULL AND LOWER(TRIM(name)) = LOWER(TRIM(?)) AND price = ? AND COALESCE(special_instructions, '') = ?",
+            [id, englishName, insertPrice, itemNote]
+          );
+        }
+        if (existing) {
+          await tx.run("UPDATE order_items SET quantity = quantity + ? WHERE id = ?", [insertQty, existing.id]);
+          didUpdate = true;
         }
         if (!didUpdate) {
           await tx.run(
@@ -1304,10 +1315,9 @@ export async function addOrderItems(db, id, itemsToAdd, description) {
       items: items.map((item) => ({
         id: item.id,
         menuItemId: item.menu_item_id,
-        name: item.name,
-        category: item.category_name || "",
-        categoryId: item.category_id || "",
-        categoryId: item.category_id || "",
+        name: resolveEnglishItemName(item),
+        category: item.category_name || item.mi_category_name || "",
+        categoryId: item.category_id || item.mi_category_id || "",
         quantity: Number(item.quantity || 0),
         price: Number(item.price || 0),
         specialInstructions: item.special_instructions || "",
@@ -1443,7 +1453,7 @@ export async function removeOrderItems(db, id, itemIds) {
       items: items.map((item) => ({
         id: item.id,
         menuItemId: item.menu_item_id,
-        name: item.name,
+        name: resolveEnglishItemName(item),
         category: item.category_name || item.mi_category_name || "",
         categoryId: item.category_id || item.mi_category_id || "",
         quantity: Number(item.quantity || 0),

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS menu_items (
   prep_time INT,
   rating DOUBLE DEFAULT 0,
   metadata TEXT,
+  category_name TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL
@@ -236,7 +237,9 @@ export async function initializeSchema(db) {
       "ALTER TABLE orders ADD COLUMN payment_splits TEXT",
       "ALTER TABLE orders ADD COLUMN tip_amount DOUBLE DEFAULT 0",
       "ALTER TABLE orders ADD COLUMN completed_at TIMESTAMP NULL",
-      "ALTER TABLE orders ADD COLUMN archived TINYINT(1) DEFAULT 0"
+      "ALTER TABLE orders ADD COLUMN archived TINYINT(1) DEFAULT 0",
+      "ALTER TABLE menu_items ADD COLUMN category_name TEXT",
+      "ALTER TABLE menu_items MODIFY COLUMN category_name TEXT"
     ];
     for (const stmt of optionalColumns) {
       try {
