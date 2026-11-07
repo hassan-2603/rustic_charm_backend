@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 
 async function run() {
     const token = 'rustic-charm-admin-token';
-    const url = `rusticcharmbackend.railway.internal/api/admin/upload-image?adminToken=${token}`;
+    const url = `rusticcharmbackend-production.up.railway.app/api/admin/upload-image?adminToken=${token}`;
 
     const form = new FormData();
     // Create a small mock text file, but name it .png so mimetype filter or content doesn't fail
