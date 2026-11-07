@@ -753,7 +753,7 @@ export async function deleteTable(db, id) {
   return { id };
 }
 
-export async function getOrders(db, { includeCompleted = false, forReports = false } = {}) {
+export async function getOrders(db, { includeCompleted = false, forReports = false, startDate = null, endDate = null } = {}) {
   if (isSqliteDb(db)) {
     let whereClause = "";
     if (forReports) {
@@ -763,12 +763,24 @@ export async function getOrders(db, { includeCompleted = false, forReports = fal
     } else {
       whereClause = "WHERE status NOT IN ('Completed', 'Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL)";
     }
+
+    const params = [];
+    if (startDate) {
+      whereClause += (whereClause ? " AND " : "WHERE ") + "o.created_at >= ?";
+      params.push(startDate);
+    }
+    if (endDate) {
+      whereClause += (whereClause ? " AND " : "WHERE ") + "o.created_at <= ?";
+      params.push(endDate);
+    }
+
     const rows = await db.all(
       `SELECT o.*, w.name AS lookup_waiter_name 
        FROM orders o 
        LEFT JOIN waiters w ON o.waiter_id = w.id 
        ${whereClause.replace(/\bstatus\b/g, 'o.status').replace(/\barchived\b/g, 'o.archived')} 
-       ORDER BY o.created_at DESC`
+       ORDER BY o.created_at DESC`,
+      params
     );
     if (!rows || rows.length === 0) {
       return [];

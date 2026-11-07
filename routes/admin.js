@@ -303,7 +303,9 @@ router.get("/orders", async (req, res, next) => {
   try {
     const includeCompleted = req.query.includeCompleted === "true" || req.query.all === "true";
     const forReports = req.query.forReports === "true" || req.query.reports === "true";
-    const orders = await getOrders(req.app.locals.db, { includeCompleted, forReports });
+    const startDate = req.query.startDate ? String(req.query.startDate).trim() : null;
+    const endDate = req.query.endDate ? String(req.query.endDate).trim() : null;
+    const orders = await getOrders(req.app.locals.db, { includeCompleted, forReports, startDate, endDate });
     res.json(buildApiResponse(orders));
   } catch (err) {
     next(buildApiError(err.message, 500));
