@@ -756,15 +756,18 @@ export async function deleteTable(db, id) {
 export async function getOrders(db, { includeCompleted = false, forReports = false, startDate = null, endDate = null } = {}) {
   if (isSqliteDb(db)) {
     let whereClause = "";
+    const params = [];
     if (forReports) {
       whereClause = "WHERE status NOT IN ('Cancelled', 'Rejected')";
     } else if (includeCompleted) {
       whereClause = "WHERE status NOT IN ('Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL)";
     } else {
-      whereClause = "WHERE status NOT IN ('Completed', 'Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL)";
+      // Active orders stay until resolved; Completed & Cancelled orders stay for 1 week (7 days) then disappear
+      const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      whereClause = "WHERE (status NOT IN ('Completed', 'Cancelled', 'Rejected') OR (status IN ('Completed', 'Cancelled') AND created_at >= ?)) AND (archived = 0 OR archived IS NULL)";
+      params.push(oneWeekAgo);
     }
 
-    const params = [];
     if (startDate) {
       whereClause += (whereClause ? " AND " : "WHERE ") + "o.created_at >= ?";
       params.push(startDate);
@@ -778,7 +781,7 @@ export async function getOrders(db, { includeCompleted = false, forReports = fal
       `SELECT o.*, w.name AS lookup_waiter_name 
        FROM orders o 
        LEFT JOIN waiters w ON o.waiter_id = w.id 
-       ${whereClause.replace(/\bstatus\b/g, 'o.status').replace(/\barchived\b/g, 'o.archived')} 
+       ${whereClause.replace(/\bstatus\b/g, 'o.status').replace(/\barchived\b/g, 'o.archived').replace(/\bcreated_at\b/g, 'o.created_at')} 
        ORDER BY o.created_at DESC`,
       params
     );
@@ -1662,8 +1665,9 @@ export async function deleteOrder(db, id) {
     const order = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
     if (!order) return { id };
 
-    // Soft-archive order so it clears from screen views but is preserved in reports
-    await db.run("UPDATE orders SET archived = 1 WHERE id = ?", [id]);
+    const now = new Date().toISOString();
+    // Mark order as Cancelled and keep archived = 0 so it stays in the Cancelled tab for 1 week
+    await db.run("UPDATE orders SET status = 'Cancelled', archived = 0, updated_at = ? WHERE id = ?", [now, id]);
 
     const targetTableId = order.table_id || (order.table_reference ? (await db.get("SELECT id FROM tables WHERE table_key = ? OR id = ? LIMIT 1", [order.table_reference, order.table_reference]))?.id : null);
     if (targetTableId) {
@@ -1704,7 +1708,43 @@ export async function deleteOrder(db, id) {
   return { id };
 }
 
-export async function generateOrderNumber(db) {
+export async function undoCancelOrder(db, id) {
+  if (!id) throw new Error("Order ID is required");
+
+  if (isSqliteDb(db)) {
+    const order = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
+    if (!order) throw new Error("Order not found");
+
+    const now = new Date().toISOString();
+    // Restore to active status: if waiter was assigned, restore to 'Accepted', otherwise 'Pending'
+    const restoredStatus = order.waiter_id ? "Accepted" : "Pending";
+
+    await db.run(
+      "UPDATE orders SET status = ?, archived = 0, updated_at = ? WHERE id = ?",
+      [restoredStatus, now, id]
+    );
+
+    // Re-occupy the table if it exists
+    const targetTableId = order.table_id || (order.table_reference ? (await db.get("SELECT id FROM tables WHERE table_key = ? OR id = ? LIMIT 1", [order.table_reference, order.table_reference]))?.id : null);
+    if (targetTableId) {
+      await db.run(
+        "UPDATE tables SET occupied = 1, status = 'occupied', current_order_id = ?, updated_at = ? WHERE id = ?",
+        [id, now, targetTableId]
+      );
+      invalidateTableCache();
+    }
+
+    return { id, status: restoredStatus, ok: true };
+  }
+
+  const docRef = ordersCollection(db).doc(id);
+  const snap = await docRef.get();
+  if (!snap.exists) throw new Error("Order not found");
+  const data = snap.data();
+  const restoredStatus = data.waiterId ? "Accepted" : "Pending";
+  await docRef.update({ status: restoredStatus, archived: 0 });
+  return { id, status: restoredStatus, ok: true };
+}
   if (isSqliteDb(db)) {
     // Use MAX() to avoid race conditions when concurrent orders are placed
     const row = await db.get("SELECT MAX(CAST(REPLACE(order_number, 'RC-', '') AS UNSIGNED)) AS last_num FROM orders WHERE order_number LIKE 'RC-%'");

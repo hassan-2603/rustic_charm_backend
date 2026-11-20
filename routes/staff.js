@@ -11,6 +11,7 @@ import {
   removeOrderItems,
   updateOrderItemPrices,
   deleteOrder,
+  undoCancelOrder,
   saveOrderSplits,
   getOrderSplits,
   createAdminOrder,
@@ -161,6 +162,19 @@ router.delete("/orders/:id", async (req, res, next) => {
       return res.status(400).json({ ok: false, error: "Order ID is required" });
     }
     const result = await deleteOrder(req.app.locals.db, id);
+    res.json(buildApiResponse(result));
+  } catch (err) {
+    next(buildApiError(err.message, 500));
+  }
+});
+
+router.post("/orders/:id/undo-cancel", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Order ID is required" });
+    }
+    const result = await undoCancelOrder(req.app.locals.db, id);
     res.json(buildApiResponse(result));
   } catch (err) {
     next(buildApiError(err.message, 500));
