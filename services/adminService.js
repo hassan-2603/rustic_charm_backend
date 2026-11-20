@@ -1745,6 +1745,8 @@ export async function undoCancelOrder(db, id) {
   await docRef.update({ status: restoredStatus, archived: 0 });
   return { id, status: restoredStatus, ok: true };
 }
+
+async function generateOrderNumber(db) {
   if (isSqliteDb(db)) {
     // Use MAX() to avoid race conditions when concurrent orders are placed
     const row = await db.get("SELECT MAX(CAST(REPLACE(order_number, 'RC-', '') AS UNSIGNED)) AS last_num FROM orders WHERE order_number LIKE 'RC-%'");
