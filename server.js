@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import compression from "compression";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -27,6 +28,7 @@ const __dirname = path.dirname(__filename);
 // Offer storage helper is moved to a shared service module.
 
 const app = express();
+app.use(compression({ threshold: 1024 }));
 const PORT = process.env.PORT || 5000;
 const defaultCorsOrigins = [
   "http://localhost:3000",

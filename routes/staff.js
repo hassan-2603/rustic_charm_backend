@@ -84,7 +84,7 @@ router.get("/kitchen-credentials", async (req, res, next) => {
 // ==========================================
 router.get("/orders", async (req, res, next) => {
   try {
-    const orders = await getOrders(req.app.locals.db);
+    const orders = await getOrders(req.app.locals.db, { activeOnly: true });
     res.json(buildApiResponse(orders));
   } catch (err) {
     next(buildApiError(err.message, 500));

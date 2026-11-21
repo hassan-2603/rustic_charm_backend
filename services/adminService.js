@@ -753,11 +753,13 @@ export async function deleteTable(db, id) {
   return { id };
 }
 
-export async function getOrders(db, { includeCompleted = false, forReports = false, startDate = null, endDate = null } = {}) {
+export async function getOrders(db, { includeCompleted = false, forReports = false, activeOnly = false, startDate = null, endDate = null } = {}) {
   if (isSqliteDb(db)) {
     let whereClause = "";
     const params = [];
-    if (forReports) {
+    if (activeOnly) {
+      whereClause = "WHERE status NOT IN ('Completed', 'Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL)";
+    } else if (forReports) {
       whereClause = "WHERE status NOT IN ('Cancelled', 'Rejected')";
     } else if (includeCompleted) {
       whereClause = "WHERE status NOT IN ('Cancelled', 'Rejected') AND (archived = 0 OR archived IS NULL)";
@@ -800,7 +802,7 @@ export async function getOrders(db, { includeCompleted = false, forReports = fal
           mi.category_name                       AS mi_category_name,
           mi.category_id                         AS mi_category_id
        FROM order_items oi
-       LEFT JOIN menu_items mi ON (oi.menu_item_id = mi.id OR (oi.menu_item_id IS NULL AND LOWER(TRIM(oi.name)) = LOWER(TRIM(mi.name))))
+       LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
        LEFT JOIN categories c ON mi.category_id = c.id
        WHERE oi.order_id IN (${placeholders})
        ORDER BY oi.created_at ASC`,
